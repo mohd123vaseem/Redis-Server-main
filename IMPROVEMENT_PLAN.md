@@ -24,25 +24,96 @@
 
 **Why first:** Quick wins, builds confidence, gives you talking points like *"I found and fixed these bugs."*
 
-#### Bugs to Fix
+#### Category A: Logic Bugs (Critical)
 
 - [ ] **`del()` returns false** — should return `erased`
   - Location: `RedisDatabase.cpp:75`
+  - Impact: Client always sees `:0` even when key was deleted
 - [ ] **`del()` doesn't clear `expiry_map`**
-  - Re-adding a deleted key inherits old TTL
+  - Re-adding a deleted key inherits old TTL → silently expires
 - [ ] **`flushAll()` doesn't clear `expiry_map`**
-  - Same TTL inheritance issue
-- [ ] **Persistence breaks on values with spaces**
+  - Same TTL inheritance issue after FLUSHALL
+
+#### Category B: Persistence Bugs (Silent Data Corruption ⚠️)
+
+- [ ] **String values with spaces break on load**
   - Location: `RedisDatabase.cpp:359`
-  - Fix: Use length-prefixed format instead of space-separated
-- [ ] **Wrong error message in `handleHget`** — says "HSET"
-  - Location: `RedisCommandHandler.cpp:251`
-- [ ] **Typo "LEST" in `handleLset`**
-  - Location: `RedisCommandHandler.cpp:229`
-- [ ] **`std::stoi` in RESP parser can crash on garbage input**
+  - `SET msg "hello world"` → dumps as `K msg hello world` → loads as `value="hello"` (lost "world")
+  - Fix: Use length-prefixed format (`K <keylen> <key> <vallen> <value>`)
+- [ ] **List items with spaces break on load**
+  - Same root cause — `>>` operator splits on whitespace
+  - `LPUSH list "hello world"` → loads as 2 separate items
+- [ ] **Hash values with spaces break on load**
+  - Even worse: hash entries become separate orphan tokens silently skipped
+- [ ] **Hash values with colons break on load**
+  - Parser does `pair.find(':')` — if value contains `:`, the wrong colon is used
+  - `HSET user url "http://x.com"` → field=`url`, value=`http`
+- [ ] **TTLs are not persisted**
+  - `expiry_map` is never dumped/loaded → all expirations lost on restart
+- [ ] **No corruption detection**
+  - No checksum, no version field, no sanity checks during load
+- [ ] **Dump blocks all reads/writes**
+  - `dump()` holds `db_mutex` for the entire serialization
+  - For a 1M-key DB, server is unresponsive for seconds
+  - Real Redis solution: `fork()` + copy-on-write for snapshot
+
+#### Category C: Input Validation Bugs
+
+- [ ] **`std::stoi` in RESP parser can crash**
+  - Location: `RedisCommandHandler.cpp:39, 48`
+  - `*abc\r\n...` would throw `std::invalid_argument` → thread crashes
   - Wrap in try/catch
-- [ ] **Add `SO_RCVTIMEO` to prevent slow loris attack**
-  - Set 30-second idle timeout on each client socket
+- [ ] **`std::stoi` in handlers can also crash**
+  - Used in `handleExpire`, `handleLrem`, `handleLindex`, `handleLset`
+  - These DO have try/catch ✅ (verify)
+- [ ] **`keys()` may return duplicates**
+  - Iterates all 3 stores without dedup; harmless in practice but technically wrong
+
+#### Category D: Error Messages
+
+- [ ] **Wrong error message in `handleHget`** — says "HSET" instead of "HGET"
+  - Location: `RedisCommandHandler.cpp:251`
+- [ ] **Typo "LEST" in `handleLset`** — should be "LSET"
+  - Location: `RedisCommandHandler.cpp:229`
+
+#### Category E: Resource / Security Bugs
+
+- [ ] **No `SO_RCVTIMEO` set on client sockets** ⚠️ **slow loris vulnerability**
+  - Attacker connects + sends nothing → thread blocked forever in `recv()`
+  - Fix: Set 30-second idle timeout after `accept()`
+- [ ] **No `SO_KEEPALIVE`** — dead clients leak threads
+- [ ] **Thread vector grows forever**
+  - Location: `RedisServer.cpp:74`
+  - `threads.emplace_back(...)` never removes finished threads
+  - 10,000 disconnected clients = 10,000 stale thread objects
+- [ ] **Fixed 1024-byte recv buffer truncates large requests**
+  - Location: `RedisServer.cpp:86`
+  - Large `SET` values or `HMSET` calls get cut off
+  - Fix: Loop-read until full RESP message is parsed
+- [ ] **`purgeExpired()` is public but should be private**
+  - Location: `RedisDatabase.h:25`
+  - External callers wouldn't hold the mutex → data race
+- [ ] **`purgeExpired()` not called by list/hash operations**
+  - `lpush`, `lpop`, `hset`, etc. skip it → expired keys leak when only accessed via these
+- [ ] **Detached persistence thread has no clean shutdown**
+  - Location: `main.cpp:28`
+  - `persistanceThread.detach()` runs `while(true)` forever; relies on `exit()`
+- [ ] **Dead code in `RedisServer::run()` cleanup**
+  - Location: `RedisServer.cpp:99-107`
+  - `signalHandler` calls `exit(signum)` before `run()` ever reaches this code
+- [ ] **`globalServer` is a workaround**
+  - Because `RedisServer` isn't a singleton, a global pointer is used to bridge into `signalHandler`
+  - Cleaner: make `RedisServer` a singleton like `RedisDatabase`
+
+#### Category F: Code Smells (Nice to Have)
+
+- [ ] **`lindex` and `lset` are 90% duplicate code**
+  - Extract `resolveIndex(int& index, size_t size)` helper
+- [ ] **Vector for lists is poor choice for middle deletions**
+  - `lrem` mode 2/3 is O(N×count) due to shifts
+  - Real Redis uses a quicklist (linked list of vectors)
+- [ ] **`std::reverse_iterator<...>(fwdIter)` is verbose**
+  - Replace with `std::make_reverse_iterator(fwdIter)` (C++14)
 
 ---
 
@@ -129,6 +200,14 @@ These are all common systems-interview topics.
 
 > *"After switching from thread-per-client to epoll, my server handles **50,000 req/sec** vs **5,000 req/sec** previously, while using **10x less memory** per connection."*
 
+#### Bonus: Quick Active TTL Eviction (~2-3 hours)
+
+**Problem:** Current `purgeExpired()` is **O(N)** — scans the entire `expiry_map` on every read/write. Worse, expired keys leak memory if never accessed (lazy-only eviction).
+
+**Solution:** Add a background thread that samples ~20 random expired keys per second (same approach as real Redis). Add an `activeExpire()` method, spawn a detached thread in `main.cpp` calling it every second.
+
+**Talking point:** *"I added active eviction with random sampling, similar to real Redis. For production scale, a bucketed timer wheel would give O(log N) instead of O(N)."*
+
 ---
 
 ### Phase 5 (Stretch Goals): Real Differentiators
@@ -142,6 +221,7 @@ Only do these if you have extra time. **Pick ONE**, don't try all.
 | **Cluster mode (basic)** | Distributed systems, consistent hashing |
 | **Lua scripting** | Embedded interpreter, advanced |
 | **Master/Replica replication** | Distributed systems, consensus |
+| **Full TTL optimization** (bucketed timer wheel) | Advanced data structures, O(log N) expiry — only if Phase 4's quick fix isn't enough |
 
 ---
 
@@ -216,13 +296,44 @@ Even with a perfect project, **DSA is still ~60% of FAANG interviews**. You can 
 Use this as your tracker:
 
 ### Phase 1: Bug Fixes
+
+**Logic:**
 - [ ] Fix `del()` return value
 - [ ] Fix `del()` expiry leak
 - [ ] Fix `flushAll()` expiry leak
-- [ ] Fix persistence with spaces (length-prefixed format)
-- [ ] Fix error message typos
-- [ ] Wrap `std::stoi` in try/catch
-- [ ] Add `SO_RCVTIMEO` timeout
+
+**Persistence (silent data corruption):**
+- [ ] Fix string values with spaces
+- [ ] Fix list items with spaces
+- [ ] Fix hash values with spaces
+- [ ] Fix hash values containing `:`
+- [ ] Persist TTLs in dump file
+- [ ] Add corruption detection (checksum)
+- [ ] Non-blocking dump (fork or async)
+
+**Validation:**
+- [ ] Wrap `std::stoi` calls in try/catch (parser + handlers)
+- [ ] Dedupe `keys()` output
+
+**Error messages:**
+- [ ] Fix `handleHget` message
+- [ ] Fix `handleLset` "LEST" typo
+
+**Resources / Security:**
+- [ ] Add `SO_RCVTIMEO` to prevent slow loris
+- [ ] Add `SO_KEEPALIVE`
+- [ ] Prune finished threads from vector
+- [ ] Loop-read until full RESP message (fix 1024-byte truncation)
+- [ ] Make `purgeExpired()` private
+- [ ] Call `purgeExpired()` in list/hash ops too
+- [ ] Add clean shutdown signal for persistence thread
+- [ ] Remove dead code in `RedisServer::run()` cleanup
+- [ ] Replace `globalServer` with `RedisServer` singleton
+
+**Code smells (optional):**
+- [ ] Extract `resolveIndex()` helper for `lindex`/`lset`
+- [ ] Use `std::make_reverse_iterator` in `lrem`
+- [ ] Consider quicklist/deque for lists (real Redis approach)
 
 ### Phase 2: Testing
 - [ ] Set up Google Test

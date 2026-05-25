@@ -852,6 +852,12 @@ Two fields are needed because a single `int seconds` can't express sub-second va
 | 15 | How does a client connect? What if it sends nothing? ⚠️ **IMPORTANT** | Client uses `socket()` + `connect()` to trigger handshake. If client sends nothing, `recv()` blocks forever → **slow loris vulnerability** — fix with `SO_RCVTIMEO` or async I/O |
 | 16 | How does the RESP parser work? ⚠️ **IMPORTANT** | Walks input byte-by-byte, reads `*N` (array size) and `$N` (string length) markers to slice raw bytes into clean strings; length prefixes avoid issues with spaces/special chars |
 | 17 | Command dispatcher and RESP response patterns ⚠️ **IMPORTANT** | Dispatcher uppercases command + routes via if/else; 3 main response types: simple string (`+`), bulk string (`$len`/`$-1`), array (`*N`); all handlers follow validate→call→format template |
+| 18 | How does `purgeExpired()` work? | Lazy eviction — walks `expiry_map`, erases past-deadline keys from all 3 stores; called inside get/keys/type/del/expire/rename; O(N) and missing from list/hash ops |
+| 19 | `steady_clock` vs `system_clock` — why it matters for TTLs | `steady_clock` is monotonic (only forward), immune to NTP/DST/admin changes. `system_clock` is wall time — breaks TTLs when clock jumps |
+| 20 | What is `std::lock_guard<std::mutex>`? | RAII wrapper that locks on construction, auto-unlocks on scope exit (even on exceptions). Standard safe way to use mutexes in modern C++ |
+| 21 | How does `lrem()` work? (most complex function) | 3 modes: `count=0` uses erase-remove idiom, `count>0` forward iteration, `count<0` reverse iteration with `.base()-1` dance to convert reverse↔forward iterators |
+| 22 | `lindex`/`lset` — negative indexing and why it matters | Negative index converted via `size + index`, two-stage bounds check; negative indexing is critical for atomicity (no race), single round-trip, cleaner code, natural mental model |
+| 23 | How do `dump()` / `load()` work? (persistence) | Custom text format with K/L/H type tags; uses `ofstream`/`ifstream` + `istringstream`. ⚠️ Spaces/colons in values silently corrupt data — fix with length-prefixed encoding. Real Redis uses binary RDB + AOF |
 
 ---
 
@@ -2047,6 +2053,748 @@ Once you understand the dispatcher + the 3 response patterns above, you've seen 
 | 6 | The universal validate→call→format template | all handlers |
 
 **Location:** RedisCommandHandler.cpp:60-400
+
+---
+
+## Q18: How Does `purgeExpired()` Work (TTL Eviction)?
+
+**Question:**
+> Explain `purgeExpired()` — when is it called and how does it work?
+
+**Answer:**
+
+`purgeExpired()` deletes **expired keys** from the database using **lazy eviction** — only checks when a key is accessed.
+
+### The Code
+
+```cpp
+void RedisDatabase::purgeExpired() {
+    auto now = std::chrono::steady_clock::now();
+    for (auto it = expiry_map.begin(); it != expiry_map.end(); ) {
+        if (now > it->second) {
+            kv_store.erase(it->first);
+            list_store.erase(it->first);
+            hash_store.erase(it->first);
+            it = expiry_map.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+```
+
+### What It Does
+
+1. Get current time
+2. Walk every entry in `expiry_map` (which maps `key → expiry_time`)
+3. If past expiry → erase from all 3 stores
+4. Move on
+
+### When Is It Called?
+
+Automatically inside 6 functions: `get`, `keys`, `type`, `del`, `expire`, `rename`. This is called **lazy eviction** — keys are only purged when accessed.
+
+⚠️ **Bug:** NOT called by list/hash operations (`lpush`, `hset`, etc.). Expired keys leak there.
+
+### The Tricky Iterator Pattern
+
+```cpp
+it = expiry_map.erase(it);   // returns next valid iterator
+```
+
+You can't `++it` after erasing — the iterator becomes invalid. So `erase()` returns the next valid one, and you assign it back. Notice the loop has **no `++it` in the header**.
+
+### Lazy vs Active Eviction
+
+| Strategy | How | Pros | Cons |
+|---|---|---|---|
+| **Lazy** (this code) | Check on access | Simple | Expired keys leak if never accessed |
+| **Active** | Background thread scans | Memory cleaned | Extra CPU |
+| **Hybrid** (real Redis) | Both | Best of both | Complex |
+
+### Performance Concern
+
+This is **O(N)** — scans all expiry entries on every access. For 1M keys with TTL, every GET/SET runs a 1M-iteration loop.
+
+**Fix (planned in improvement plan):** Add background thread that samples ~20 random keys per second (real Redis approach). Quick 2-3 hour add-on.
+
+### Interview Talking Points
+
+- "How does TTL work?" → Lazy vs active eviction
+- "Why `steady_clock` not `system_clock`?" → Monotonic, immune to clock changes
+- "What if user changes system time?" → `steady_clock` doesn't care
+- "How to scale to 1M keys?" → Bucketed timer wheel, random sampling
+
+**Location:** RedisDatabase.cpp:91-104
+
+---
+
+## Q19: `steady_clock` vs `system_clock` — Why It Matters for TTLs
+
+**Question:**
+> Why does `purgeExpired()` use `steady_clock` instead of `system_clock`? What happens if the user changes the system time?
+
+**Answer:**
+
+### The Two Clocks
+
+| Clock | Measures | Affected by Time Changes? |
+|---|---|---|
+| **`system_clock`** | Wall clock time (real-world date/time) | ✅ Yes — NTP, DST, manual changes |
+| **`steady_clock`** | Monotonic ticks (always forward) | ❌ No — pure counter |
+
+Your code correctly uses:
+```cpp
+auto now = std::chrono::steady_clock::now();
+```
+
+### What Breaks with `system_clock`?
+
+#### Scenario 1: User jumps clock FORWARD
+```
+14:00:00  SET session1 abc EXPIRE 3600  → expires at 15:00:00
+14:30:00  Admin: sudo date -s "20:00:00"
+14:30:01  GET session1 → now=20:00 > expiry=15:00 → DELETED early ❌
+```
+
+#### Scenario 2: User jumps clock BACKWARD
+```
+14:00:00  SET session1 abc EXPIRE 60   → expires at 14:01:00
+14:00:30  Admin: sudo date -s "10:00:00"
+          → key never expires until system clock catches back up to 14:01 ❌
+          → could "live forever" ❌
+```
+
+### Why `steady_clock` Is Safe
+
+`steady_clock` is just **ticks since boot** — pure number that only goes up. Doesn't care about NTP, DST, time zones, or admin changes. A 60-second TTL is always exactly 60 real seconds.
+
+### Real-World Time Change Causes
+
+- **NTP synchronization** (constantly, small adjustments)
+- **Daylight Saving Time** (twice a year)
+- **VM migration / leap seconds / hardware drift**
+- **Manual admin changes**
+
+### When to Use Each
+
+| Use Case | Right Clock |
+|---|---|
+| TTL / expiration / timeouts | `steady_clock` ✅ |
+| Benchmarking elapsed time | `steady_clock` ✅ |
+| Logging "created at" timestamps | `system_clock` ✅ |
+| Displaying time to user | `system_clock` ✅ |
+
+### Interview Answer
+
+> *"`system_clock` represents wall clock time, which can jump forward (NTP, DST) or backward (manual changes), causing TTLs to expire too early or never expire. `steady_clock` is monotonic — only moves forward at constant rate, so a 60-second TTL is always 60 real seconds. Use `system_clock` only when you need human-readable dates."*
+
+**Location:** RedisDatabase.cpp:92, RedisDatabase.h:65
+
+---
+
+## Q20: What is `std::lock_guard<std::mutex>`?
+
+**Question:**
+> Explain `std::lock_guard<std::mutex> lock(db_mutex)` — what is it and how does it work?
+
+**Answer:**
+
+`lock_guard` is a **smart wrapper** that locks a mutex on creation and **automatically unlocks** it when it goes out of scope.
+
+### The Code
+
+```cpp
+std::lock_guard<std::mutex> lock(db_mutex);  // locks immediately
+// ... do stuff ...
+}  // ← `lock` destroyed here, mutex AUTO-UNLOCKED
+```
+
+### Without lock_guard (Unsafe)
+
+```cpp
+db_mutex.lock();
+kv_store[key] = value;   // if this throws...
+db_mutex.unlock();        // this NEVER runs → DEADLOCK ❌
+```
+
+### With lock_guard (Safe)
+
+```cpp
+std::lock_guard<std::mutex> lock(db_mutex);
+kv_store[key] = value;   // even if this throws...
+}  // destructor runs, mutex unlocked ✅
+```
+
+### Why This Works — Stack Unwinding
+
+When an exception is thrown:
+1. Execution jumps out of the function (next line does NOT run)
+2. C++ runtime **destroys all local objects in reverse order**
+3. Each destructor runs (this unlocks the mutex)
+4. Exception continues bubbling up
+
+This guarantee is called **RAII** — Resource Acquisition Is Initialization.
+
+### Exception Behavior Clarification (Common Confusion)
+
+```cpp
+db_mutex.lock();         // ✅ runs
+throw std::exception();  // ⚠️ jumps out
+db_mutex.unlock();       // ❌ SKIPPED — exception doesn't continue line by line
+```
+
+Once `throw` happens, execution **abandons the function** immediately. It does NOT continue to the next line.
+
+### Comparison
+
+| Approach | Auto-unlock? | Exception-safe? |
+|---|---|---|
+| Manual `lock()/unlock()` | ❌ No | ❌ No |
+| `std::lock_guard` | ✅ Yes | ✅ Yes |
+| `std::unique_lock` | ✅ Yes | ✅ Yes (more flexible) |
+
+For 95% of cases, `lock_guard` is correct. Use `unique_lock` only when you need to unlock early or transfer ownership.
+
+### Restaurant Analogy
+
+```
+Manual lock:    take key, must remember to return it (forget → deadlock)
+lock_guard:     key on a wristband that auto-returns when you leave ✅
+```
+
+### TL;DR
+
+```cpp
+std::lock_guard<std::mutex> lock(db_mutex);
+```
+
+= **"Lock this mutex. Auto-unlock when scope exits — even on exceptions."**
+
+The standard, safe way to use mutexes in modern C++.
+
+**Location:** RedisDatabase.cpp — every function (used 25+ times)
+
+---
+
+## Q21: How Does `lrem()` Work? (Most Complex Function)
+
+**Question:**
+> Explain `lrem()` — what it does and how the 3 modes work.
+
+**Answer:**
+
+`lrem()` removes occurrences of a value from a list with **3 modes** based on the count parameter:
+
+| Count | Mode |
+|---|---|
+| `count = 0` | Remove **ALL** occurrences |
+| `count > 0` | Remove first N occurrences (head → tail) |
+| `count < 0` | Remove last N occurrences (tail → head) |
+
+### Example
+
+```
+List:  [a, b, a, c, a, d, a]
+
+LREM key  0  a  →  [b, c, d]            (all 4 'a's removed)
+LREM key  2  a  →  [b, c, a, d, a]      (first 2 'a's removed)
+LREM key -2  a  →  [a, b, a, c, d]      (last 2 'a's removed)
+```
+
+---
+
+### Mode 1: `count == 0` — Erase-Remove Idiom
+
+```cpp
+auto new_end = std::remove(lst.begin(), lst.end(), value);
+removed = std::distance(new_end, lst.end());
+lst.erase(new_end, lst.end());
+```
+
+This is the **classic C++ erase-remove idiom**. Key insight: **`std::remove` does NOT actually remove**! It shuffles unwanted elements to the end and returns an iterator to the "new end".
+
+```
+Before:  [a, b, a, c, a, d, a]
+                                ↑ lst.end()
+
+After std::remove:
+         [b, c, d, ?, ?, ?, ?]
+                   ↑ new_end (returned)
+                                ↑ lst.end() unchanged
+
+After lst.erase(new_end, end):
+         [b, c, d]   ✅
+```
+
+`std::remove` is a generic algorithm — it works on arrays too where you can't shrink size. The `erase` step physically removes trailing junk.
+
+---
+
+### Mode 2: `count > 0` — Forward Iteration
+
+```cpp
+for (auto iter = lst.begin(); iter != lst.end() && removed < count; ) {
+    if (*iter == value) {
+        iter = lst.erase(iter);   // erase returns next valid iter
+        ++removed;
+    } else {
+        ++iter;
+    }
+}
+```
+
+Standard forward iteration using the **erase-returns-next-iterator pattern** (same as `purgeExpired`).
+
+**Why no `++iter` in header?** Because we either erase (which advances) or manually skip. Putting `++iter` in the header would skip elements after an erase.
+
+---
+
+### Mode 3: `count < 0` — Reverse Iteration (The Tricky One)
+
+```cpp
+for (auto riter = lst.rbegin(); riter != lst.rend() && removed < (-count); ) {
+    if (*riter == value) {
+        auto fwdIter = riter.base();
+        --fwdIter;
+        fwdIter = lst.erase(fwdIter);
+        ++removed;
+        riter = std::reverse_iterator<std::vector<std::string>::iterator>(fwdIter);
+    } else {
+        ++riter;
+    }
+}
+```
+
+#### The Problem
+
+`vector::erase` only accepts **forward iterators**. But we're walking **backwards** with reverse iterators. So we need to dance between the two.
+
+#### The Reverse Iterator Off-By-One
+
+`reverse_iterator.base()` returns a forward iterator pointing **one past** the actual element:
+
+```
+Reverse iterator   →   .base() returns
+─────────────────       ──────────────
+points to 'e'       →   points ONE PAST 'e' (past-the-end)
+points to 'd'       →   points to 'e'
+```
+
+That's why the code does `--fwdIter` after `.base()` — to step back to the real element.
+
+#### The Full Dance Per Iteration
+
+```cpp
+auto fwdIter = riter.base();   // reverse → forward (off by 1)
+--fwdIter;                      // fix off-by-one
+fwdIter = lst.erase(fwdIter);   // erase (returns forward iter)
+riter = std::reverse_iterator<...>(fwdIter);  // forward → reverse, resume backward walk
+```
+
+**Hallway analogy:**
+- Walking east-to-west (reverse iteration)
+- Door-removal tool only works while facing west-to-east
+- Turn around (`.base()`) → remove door → turn back (`reverse_iterator(fwdIter)`) → continue walking west
+
+---
+
+### Performance Analysis
+
+| Mode | Complexity | Notes |
+|---|---|---|
+| Mode 1 (all) | O(N) | Single pass with `std::remove` |
+| Mode 2 (head) | O(N×count) | Each vector erase shifts later elements |
+| Mode 3 (tail) | O(N×count) | Same shift problem |
+
+**Vector** is bad for middle deletions (O(N) per erase). **Real Redis** uses a custom **quicklist** (linked list of vectors) to balance random access + cheap deletes.
+
+---
+
+### Key Concepts
+
+| Concept | Why It Matters |
+|---|---|
+| **Erase-remove idiom** | Standard C++ pattern for bulk removal |
+| **`std::remove` doesn't remove** | Just shuffles; needs `erase` to actually delete |
+| **`erase()` returns next iterator** | Avoids iterator invalidation |
+| **`reverse_iterator.base() - 1`** | Convert reverse → forward iterator |
+| **`std::make_reverse_iterator`** (C++14) | Cleaner conversion than `std::reverse_iterator<T>(...)` |
+
+### Interview Questions
+
+| Question | What They Test |
+|---|---|
+| Explain the erase-remove idiom | Standard library knowledge |
+| Why does `std::remove` not actually remove? | Generic algorithm understanding |
+| How does `reverse_iterator.base()` work? | Iterator semantics (advanced) |
+| Time complexity? | Algorithmic thinking |
+| Why vector instead of list? | Data structure trade-offs |
+
+### TL;DR
+
+3 modes, 3 different techniques:
+- **Mode 0**: erase-remove idiom (one-shot bulk removal)
+- **Mode +N**: forward iteration with `it = erase(it)` pattern
+- **Mode -N**: reverse iteration with `.base() - 1` conversion dance
+
+The reverse-iterator dance is the **trickiest part of this entire codebase**. Everything else (`hset`, `lpop`, etc.) is straightforward by comparison.
+
+**Location:** RedisDatabase.cpp:191-230
+
+---
+
+## Q22: `lindex()` / `lset()` — Negative Indexing & Why It Matters
+
+**Question:**
+> How do `lindex` and `lset` work, and why is negative indexing necessary when positive indices could do the job?
+
+**Answer:**
+
+### What These Functions Do
+
+| Function | Purpose |
+|---|---|
+| `lindex(key, index)` | Read element at position |
+| `lset(key, index, value)` | Update element at position |
+
+Both support **negative indices** (Python-style — count from the end).
+
+### The Code Pattern
+
+```cpp
+if (index < 0)
+    index = lst.size() + index;        // convert negative to positive
+if (index < 0 || index >= static_cast<int>(lst.size()))
+    return false;                       // bounds check both ends
+```
+
+**Two-stage validation:**
+1. Negative → positive via `size + index` math
+2. Re-check both ends (negative could still be out of range, e.g., `-size-1`)
+
+**`static_cast<int>(lst.size())`** silences GCC's signed/unsigned comparison warning.
+
+### Negative Index Math
+
+```
+List:    [a, b, c, d, e]
+Index:    0  1  2  3  4   ← positive
+Index:   -5 -4 -3 -2 -1   ← negative
+
+index = -1   →   5 + (-1) = 4  → 'e' ✅
+index = -6   →   5 + (-6) = -1 → out of bounds ❌
+```
+
+---
+
+### Why Negative Indexing Is Critical
+
+You're right that positive indices could technically do the job. But negative indexing exists for **5 strong reasons**:
+
+#### 1. Atomicity (Race Condition Protection)
+
+**Without negative:**
+```
+Client A: LLEN mylist → 5
+                       ← meanwhile Client B: LPUSH mylist "new" (size=6 now)
+Client A: LSET mylist 4 "updated"
+          ↑ updates WRONG element ❌
+```
+
+**With negative:**
+```
+Client A: LSET mylist -1 "updated"  ← always updates true last element ✅
+```
+
+Server resolves `-1` at execution time after acquiring the lock. No race possible.
+
+#### 2. Single Command vs Two
+
+```
+WITHOUT -1: LLEN + LINDEX (2 round trips, 2 commands)
+WITH -1:    LINDEX -1     (1 round trip, atomic)
+```
+
+#### 3. Cleaner Client Code
+
+```cpp
+// Without:
+int size = redis.llen("mylist");
+int realIndex = (userInput < 0) ? size + userInput : userInput;
+std::string val = redis.lindex("mylist", realIndex);
+
+// With:
+std::string val = redis.lindex("mylist", userInput);
+```
+
+#### 4. Natural Mental Model
+
+| Thought | Index |
+|---|---|
+| "First item" | `0` |
+| "Last item" | `-1` |
+| "Second to last" | `-2` |
+
+Matches how humans describe positions.
+
+#### 5. Industry Convention
+
+Python, JavaScript (`.at`), Ruby, Redis — they all do it. Programmers expect it.
+
+---
+
+### Code Smell: Duplication
+
+`lindex` and `lset` are 90% identical. A cleaner design would extract:
+
+```cpp
+bool resolveIndex(int& index, size_t size) {
+    if (index < 0) index = size + index;
+    return (index >= 0 && index < static_cast<int>(size));
+}
+```
+
+Worth mentioning as a refactor in interviews.
+
+### Key Concepts
+
+| Concept | Why It Matters |
+|---|---|
+| **Negative indexing** | Atomic "from-the-end" access |
+| **`size + (-index)` math** | Standard conversion pattern |
+| **Two-stage bounds check** | Validates both negative-out and positive-out cases |
+| **`static_cast<int>` for `size_t`** | Signed/unsigned comparison workaround |
+| **Out-parameter (bool + ref)** | Same as `get()` — distinguishes "not found" from value |
+
+### TL;DR
+
+Negative indexing isn't a convenience — it's a **correctness + performance feature**. It eliminates race conditions, saves round-trips, and matches universal programmer expectations.
+
+**Location:** RedisDatabase.cpp:232-262
+
+---
+
+## Q23: How Do `dump()` / `load()` Work? (Persistence — High Interview Value)
+
+**Question:**
+> Explain `dump()` and `load()` — the persistence format, the known bugs, and how to fix them.
+
+**Answer:**
+
+`dump()` writes the in-memory database to a file; `load()` reads it back. They use a custom **text-based format**.
+
+### The Format
+
+Each line is one record, first character is a **type tag**:
+
+| Tag | Type | Format |
+|---|---|---|
+| `K` | Key-Value | `K <key> <value>` |
+| `L` | List | `L <key> <item1> <item2> ...` |
+| `H` | Hash | `H <key> <field1>:<value1> <field2>:<value2> ...` |
+
+**Example `dump.my_rdb`:**
+```
+K username alice
+L fruits apple banana orange
+H user:1 name:bob age:30
+```
+
+---
+
+### `dump()` — Step by Step
+
+```cpp
+bool RedisDatabase::dump(const std::string& filename) {
+    std::lock_guard<std::mutex> lock(db_mutex);
+    std::ofstream ofs(filename, std::ios::binary);
+    if (!ofs) return false;
+
+    for (const auto& kv: kv_store)
+        ofs << "K " << kv.first << " " << kv.second << "\n";
+
+    for (const auto& kv : list_store) {
+        ofs << "L " << kv.first;
+        for (const auto& item : kv.second) ofs << " " << item;
+        ofs << "\n";
+    }
+
+    for (const auto& kv : hash_store) {
+        ofs << "H " << kv.first;
+        for (const auto& fv : kv.second) ofs << " " << fv.first << ":" << fv.second;
+        ofs << "\n";
+    }
+    return true;
+}
+```
+
+1. Lock the DB (prevents writes during dump)
+2. Open file in **binary mode** (avoids `\n` → `\r\n` translation on Windows)
+3. Iterate each store, write one line per entry
+
+---
+
+### `load()` — Step by Step
+
+```cpp
+bool RedisDatabase::load(const std::string& filename) {
+    std::lock_guard<std::mutex> lock(db_mutex);
+    std::ifstream ifs(filename, std::ios::binary);
+    if (!ifs) return false;
+
+    kv_store.clear(); list_store.clear(); hash_store.clear();
+
+    std::string line;
+    while (std::getline(ifs, line)) {
+        std::istringstream iss(line);
+        char type; iss >> type;
+        if (type == 'K') {
+            std::string key, value;
+            iss >> key >> value;
+            kv_store[key] = value;
+        } else if (type == 'L') {
+            // read key, then items one by one
+        } else if (type == 'H') {
+            // read key, then field:value pairs, split on ':'
+        }
+    }
+    return true;
+}
+```
+
+1. Lock + clear existing data (fresh restore)
+2. Read line by line via `std::getline`
+3. Wrap each line in `istringstream` to tokenize
+4. First char = type tag → dispatch to correct parsing logic
+
+---
+
+### ⚠️ Critical Bug: Values With Spaces
+
+The `>>` operator **stops at whitespace**, breaking any value containing a space.
+
+```cpp
+SET msg "hello world"
+```
+
+**Dumped:** `K msg hello world`
+
+**Loaded:**
+```cpp
+iss >> key;    // key   = "msg"
+iss >> value;  // value = "hello"   ← "world" LOST ❌
+```
+
+### Same Bug in Lists & Hashes
+
+```
+LPUSH list "hello world"
+↓ dump: L list hello world
+↓ load: list_store["list"] = ["hello", "world"]   ← 2 items instead of 1 ❌
+```
+
+```
+HSET user 1 "John Smith"
+↓ dump: H user 1:John Smith
+↓ load: hash["1"] = "John"   ← "Smith" silently dropped ❌
+```
+
+**Hash also breaks on colons:**
+```
+HSET user url "http://x.com"
+↓ load: field=url, value=http   ← wrong colon used ❌
+```
+
+---
+
+### How to Fix (Length-Prefixed Encoding)
+
+Real Redis uses length prefixes (same idea as RESP):
+
+```
+K 3 11 msg hello world
+↑ ↑ ↑
+| | length of value
+| length of key
+type
+```
+
+This makes the format **binary-safe** — any byte sequence in keys/values works correctly.
+
+---
+
+### Why `std::ios::binary`?
+
+```cpp
+std::ofstream ofs(filename, std::ios::binary);
+```
+
+- **Without binary mode (Windows):** `\n` → `\r\n` on disk; reading back `\r\n` → `\n` → file corruption when moved cross-platform
+- **With binary mode:** bytes written exactly as-is → portable
+
+---
+
+### Other Persistence Issues
+
+| Issue | Impact |
+|---|---|
+| **TTLs not persisted** | All expirations lost on restart |
+| **Dump locks entire DB** | Server pauses during snapshot |
+| **No checksum** | Can't detect file corruption |
+| **No transaction log** | Crashes between dumps lose all changes |
+| **No compression** | Big DB = big file |
+
+### How Real Redis Solves It
+
+- **RDB format:** Binary, length-prefixed, checksummed
+- **AOF (Append-Only File):** Every write logged → durability
+- **`fork()` + Copy-on-Write:** Background snapshot without blocking
+
+---
+
+### Key Concepts
+
+| Concept | Why It Matters |
+|---|---|
+| **`ofstream` / `ifstream`** | Standard C++ file I/O |
+| **`std::ios::binary`** | Cross-platform byte consistency |
+| **`std::getline`** | Read file line by line |
+| **`istringstream`** | Tokenize a single line |
+| **`>>` whitespace splitting** | Source of all persistence bugs |
+| **Length prefixing** | The fix — binary-safe encoding |
+
+### Interview Questions
+
+| Question | What They're Testing |
+|---|---|
+| "How would you serialize a key-value store?" | Format design awareness |
+| "What's wrong with space-delimited values?" | Bug recognition |
+| "How would you make it binary-safe?" | Length-prefix understanding |
+| "Why does Redis use a binary format?" | Performance + correctness reasoning |
+| "What if the server crashes between dumps?" | Durability / AOF knowledge |
+| "How to reduce dump latency?" | `fork()` + COW (real Redis approach) |
+
+### TL;DR
+
+```
+dump() = iterate all 3 stores → write each entry as text line
+load() = read each line → first char = type → parse & restore
+
+Bug: Values with spaces silently corrupt (>> stops at whitespace) ❌
+Fix: Length-prefixed encoding (like RESP)
+```
+
+| Aspect | Detail |
+|---|---|
+| **Strength** | Human-readable, easy to debug |
+| **Weakness** | Not binary-safe → silent data loss |
+| **Production fix** | Length prefixes OR escaping OR binary format |
+| **Real Redis** | RDB (binary snapshot) + AOF (write log) |
+
+**This is the most interview-rich function pair** in the codebase — it has a real bug with a known fix and opens discussions about file I/O, serialization, durability, and crash recovery.
+
+**Location:** RedisDatabase.cpp:353-441
 
 ---
 
