@@ -105,14 +105,8 @@ void RedisServer::run() {
             close(client_socket);
         });
     }
-    
-    for (auto& t : threads) {
-        if (t.joinable()) t.join();
-    }
-
-    // Before shutdown, persist the database
-    if (RedisDatabase::getInstance().dump("dump.my_rdb"))
-        std::cout << "Database Dumped to dump.my_rdb\n";
-    else 
-        std::cerr << "Error dumping database\n";
+    // NOTE: cleanup (thread join + final dump) intentionally omitted here.
+    // signalHandler() calls exit() before this point is ever reached, so any
+    // code here is unreachable. Proper shutdown handled in shutdown() instead.
+    // TODO (Group B): remove exit() from signalHandler and restore real cleanup.
 }
