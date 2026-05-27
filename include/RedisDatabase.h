@@ -22,7 +22,6 @@ public:
     std::string type(const std::string& key);
     bool del(const std::string& key);
     bool expire(const std::string& key, int seconds);
-    void purgeExpired();
     bool rename(const std::string& oldKey, const std::string& newKey);
 
     // List Opreations
@@ -56,6 +55,9 @@ private:
     ~RedisDatabase() = default;
     RedisDatabase(const RedisDatabase&) = delete;
     RedisDatabase& operator=(const RedisDatabase&) = delete;
+
+    // Internal: caller must hold db_mutex. Removes expired keys from all stores.
+    void purgeExpired();
 
     std::mutex db_mutex;
     std::unordered_map<std::string, std::string> kv_store;

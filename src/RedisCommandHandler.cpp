@@ -27,31 +27,37 @@ std::vector<std::string> parseRespCommand(const std::string &input) {//imp
         return tokens;
     }
 
-    size_t pos = 0;
-    // Expect '*' followed by number of elements
-    if (input[pos] != '*') return tokens;
-    pos++; // skip '*'
+    try {
+        size_t pos = 0;
+        // Expect '*' followed by number of elements
+        if (input[pos] != '*') return tokens;
+        pos++; // skip '*'
 
-    // crlf = Carriage Return (\r), Line Feed (\n)
-    size_t crlf = input.find("\r\n", pos);
-    if (crlf == std::string::npos) return tokens;
+        // crlf = Carriage Return (\r), Line Feed (\n)
+        size_t crlf = input.find("\r\n", pos);
+        if (crlf == std::string::npos) return tokens;
 
-    int numElements = std::stoi(input.substr(pos, crlf - pos));
-    pos = crlf + 2;
-
-    for (int i = 0; i < numElements; i++) {
-        if (pos >= input.size() || input[pos] != '$') break; // format error
-        pos++; // skip '$'
-
-        crlf = input.find("\r\n", pos);
-        if (crlf == std::string::npos) break;
-        int len = std::stoi(input.substr(pos, crlf - pos));
+        int numElements = std::stoi(input.substr(pos, crlf - pos));
         pos = crlf + 2;
 
-        if (pos + len > input.size()) break;
-        std::string token = input.substr(pos, len);
-        tokens.push_back(token);
-        pos += len + 2; // skip token and CRLF
+        for (int i = 0; i < numElements; i++) {
+            if (pos >= input.size() || input[pos] != '$') break; // format error
+            pos++; // skip '$'
+
+            crlf = input.find("\r\n", pos);
+            if (crlf == std::string::npos) break;
+            int len = std::stoi(input.substr(pos, crlf - pos));
+            pos = crlf + 2;
+
+            if (pos + len > input.size()) break;
+            std::string token = input.substr(pos, len);
+            tokens.push_back(token);
+            pos += len + 2; // skip token and CRLF
+        }
+    } catch (const std::exception&) {
+        // Malformed RESP (e.g., non-numeric length) — return what we parsed so far
+        // Caller treats empty/garbage tokens as "Unknown command"
+        return {};
     }
     return tokens;
 }
@@ -225,8 +231,8 @@ static std::string handleLindex(const std::vector<std::string>& tokens, RedisDat
 }
 
 static std::string handleLset(const std::vector<std::string>& tokens, RedisDatabase& db) {
-    if (tokens.size() < 4) 
-        return "-Error: LEST requires key, index and value\r\n";
+    if (tokens.size() < 4)
+        return "-Error: LSET requires key, index and value\r\n";
     try {
         int index = std::stoi(tokens[2]);
         if (db.lset(tokens[1], index, tokens[3]))
@@ -247,8 +253,8 @@ static std::string handleHset(const std::vector<std::string>& tokens, RedisDatab
 }
 
 static std::string handleHget(const std::vector<std::string>& tokens, RedisDatabase& db) {
-    if (tokens.size() < 3) 
-        return "-Error: HSET requires key and field\r\n";
+    if (tokens.size() < 3)
+        return "-Error: HGET requires key and field\r\n";
     std::string value;
     if (db.hget(tokens[1], tokens[2], value))
         return "$" + std::to_string(value.size()) + "\r\n" + value + "\r\n";
