@@ -26,12 +26,12 @@
 
 #### Category A: Logic Bugs (Critical)
 
-- [ ] **`del()` returns false** — should return `erased`
+- [x] **`del()` returns false** — should return `erased` ✅ FIXED
   - Location: `RedisDatabase.cpp:75`
   - Impact: Client always sees `:0` even when key was deleted
-- [ ] **`del()` doesn't clear `expiry_map`**
+- [x] **`del()` doesn't clear `expiry_map`** ✅ FIXED
   - Re-adding a deleted key inherits old TTL → silently expires
-- [ ] **`flushAll()` doesn't clear `expiry_map`**
+- [x] **`flushAll()` doesn't clear `expiry_map`** ✅ FIXED
   - Same TTL inheritance issue after FLUSHALL
 
 #### Category B: Persistence Bugs (Silent Data Corruption ⚠️)
@@ -59,28 +59,27 @@
 
 #### Category C: Input Validation Bugs
 
-- [ ] **`std::stoi` in RESP parser can crash**
+- [x] **`std::stoi` in RESP parser can crash** ✅ FIXED
   - Location: `RedisCommandHandler.cpp:39, 48`
   - `*abc\r\n...` would throw `std::invalid_argument` → thread crashes
-  - Wrap in try/catch
-- [ ] **`std::stoi` in handlers can also crash**
+  - Wrapped parser body in try/catch — returns empty tokens on malformed input
+- [x] **`std::stoi` in handlers can also crash** ✅ VERIFIED — already wrapped in try/catch
   - Used in `handleExpire`, `handleLrem`, `handleLindex`, `handleLset`
-  - These DO have try/catch ✅ (verify)
 - [ ] **`keys()` may return duplicates**
   - Iterates all 3 stores without dedup; harmless in practice but technically wrong
 
 #### Category D: Error Messages
 
-- [ ] **Wrong error message in `handleHget`** — says "HSET" instead of "HGET"
+- [x] **Wrong error message in `handleHget`** — says "HSET" instead of "HGET" ✅ FIXED
   - Location: `RedisCommandHandler.cpp:251`
-- [ ] **Typo "LEST" in `handleLset`** — should be "LSET"
+- [x] **Typo "LEST" in `handleLset`** — should be "LSET" ✅ FIXED
   - Location: `RedisCommandHandler.cpp:229`
 
 #### Category E: Resource / Security Bugs
 
-- [ ] **No `SO_RCVTIMEO` set on client sockets** ⚠️ **slow loris vulnerability**
+- [x] **No `SO_RCVTIMEO` set on client sockets** ⚠️ **slow loris vulnerability** ✅ FIXED
   - Attacker connects + sends nothing → thread blocked forever in `recv()`
-  - Fix: Set 30-second idle timeout after `accept()`
+  - Set 300-second idle timeout after `accept()` (RedisServer.cpp:86-90)
 - [ ] **No `SO_KEEPALIVE`** — dead clients leak threads
 - [ ] **Thread vector grows forever**
   - Location: `RedisServer.cpp:74`
@@ -90,11 +89,10 @@
   - Location: `RedisServer.cpp:86`
   - Large `SET` values or `HMSET` calls get cut off
   - Fix: Loop-read until full RESP message is parsed
-- [ ] **`purgeExpired()` is public but should be private**
-  - Location: `RedisDatabase.h:25`
-  - External callers wouldn't hold the mutex → data race
-- [ ] **`purgeExpired()` not called by list/hash operations**
-  - `lpush`, `lpop`, `hset`, etc. skip it → expired keys leak when only accessed via these
+- [x] **`purgeExpired()` is public but should be private** ✅ FIXED
+  - Moved to private section in RedisDatabase.h
+- [x] **`purgeExpired()` not called by list/hash operations** ✅ FIXED
+  - Added to all 9 list ops + all 9 hash ops
 - [ ] **Detached persistence thread has no clean shutdown**
   - Location: `main.cpp:28`
   - `persistanceThread.detach()` runs `while(true)` forever; relies on `exit()`
@@ -298,9 +296,9 @@ Use this as your tracker:
 ### Phase 1: Bug Fixes
 
 **Logic:**
-- [ ] Fix `del()` return value
-- [ ] Fix `del()` expiry leak
-- [ ] Fix `flushAll()` expiry leak
+- [x] Fix `del()` return value ✅
+- [x] Fix `del()` expiry leak ✅
+- [x] Fix `flushAll()` expiry leak ✅
 
 **Persistence (silent data corruption):**
 - [ ] Fix string values with spaces
@@ -312,20 +310,20 @@ Use this as your tracker:
 - [ ] Non-blocking dump (fork or async)
 
 **Validation:**
-- [ ] Wrap `std::stoi` calls in try/catch (parser + handlers)
+- [x] Wrap `std::stoi` calls in try/catch (parser) ✅ — handlers already had try/catch
 - [ ] Dedupe `keys()` output
 
 **Error messages:**
-- [ ] Fix `handleHget` message
-- [ ] Fix `handleLset` "LEST" typo
+- [x] Fix `handleHget` message ✅
+- [x] Fix `handleLset` "LEST" typo ✅
 
 **Resources / Security:**
-- [ ] Add `SO_RCVTIMEO` to prevent slow loris
+- [x] Add `SO_RCVTIMEO` to prevent slow loris ✅
 - [ ] Add `SO_KEEPALIVE`
 - [ ] Prune finished threads from vector
 - [ ] Loop-read until full RESP message (fix 1024-byte truncation)
-- [ ] Make `purgeExpired()` private
-- [ ] Call `purgeExpired()` in list/hash ops too
+- [x] Make `purgeExpired()` private ✅
+- [x] Call `purgeExpired()` in list/hash ops too ✅
 - [ ] Add clean shutdown signal for persistence thread
 - [ ] Remove dead code in `RedisServer::run()` cleanup
 - [ ] Replace `globalServer` with `RedisServer` singleton
