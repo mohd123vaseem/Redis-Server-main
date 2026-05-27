@@ -225,7 +225,7 @@ int RedisDatabase::lrem(const std::string& key, int count, const std::string& va
                 --fwdIter;
                 fwdIter = lst.erase(fwdIter);
                 ++removed;
-                riter = std::reverse_iterator<std::vector<std::string>::iterator>(fwdIter);
+                riter = std::make_reverse_iterator(fwdIter);
             } else {
                 ++riter;
             }
