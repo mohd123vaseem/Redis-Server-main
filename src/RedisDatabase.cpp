@@ -4,6 +4,7 @@
 #include <sstream>
 #include <algorithm>
 #include <iterator>
+#include <unordered_set>
 
 // Singleton accessor
 RedisDatabase& RedisDatabase::getInstance() {
@@ -41,17 +42,12 @@ bool RedisDatabase::get(const std::string& key, std::string& value) {
 std::vector<std::string> RedisDatabase::keys() {
     std::lock_guard<std::mutex> lock(db_mutex);
     purgeExpired();
-    std::vector<std::string> result;
-    for (const auto& pair : kv_store) {
-        result.push_back(pair.first);
-    }
-    for (const auto& pair : list_store) {
-        result.push_back(pair.first);
-    }
-    for (const auto& pair : hash_store) {
-        result.push_back(pair.first);
-    }
-    return result;
+    // A key can exist in multiple stores (e.g. SET foo + LPUSH foo) — dedupe via set
+    std::unordered_set<std::string> unique;
+    for (const auto& pair : kv_store)   unique.insert(pair.first);
+    for (const auto& pair : list_store) unique.insert(pair.first);
+    for (const auto& pair : hash_store) unique.insert(pair.first);
+    return std::vector<std::string>(unique.begin(), unique.end());
 }
 
 std::string RedisDatabase::type(const std::string& key) {
