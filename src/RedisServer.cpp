@@ -88,6 +88,10 @@ void RedisServer::run() {
         recv_timeout.tv_usec = 0;
         setsockopt(client_socket, SOL_SOCKET, SO_RCVTIMEO, &recv_timeout, sizeof(recv_timeout));
 
+        // Detect silently-dead clients (network failure, crash) — OS probes idle sockets
+        int keepalive = 1;
+        setsockopt(client_socket, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
+
         threads.emplace_back([client_socket, &cmdHandler](){
             char buffer[1024];
             while (true) {
