@@ -77,10 +77,16 @@ void RedisServer::run() {
     while (running) {
         int client_socket = accept(server_socket, nullptr, nullptr);
         if (client_socket < 0) {
-            if (running) 
+            if (running)
                 std::cerr << "Error Accepting Client Connection\n";
             break;
         }
+
+        // Idle-client timeout: 300s — prevents slow loris (clients connecting and never sending data)
+        struct timeval recv_timeout{};
+        recv_timeout.tv_sec = 300;
+        recv_timeout.tv_usec = 0;
+        setsockopt(client_socket, SOL_SOCKET, SO_RCVTIMEO, &recv_timeout, sizeof(recv_timeout));
 
         threads.emplace_back([client_socket, &cmdHandler](){
             char buffer[1024];
