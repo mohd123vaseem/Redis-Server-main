@@ -33,29 +33,33 @@
   - Re-adding a deleted key inherits old TTL → silently expires
 - [x] **`flushAll()` doesn't clear `expiry_map`** ✅ FIXED
   - Same TTL inheritance issue after FLUSHALL
+- [x] **`HSET` only stores the first field/value pair** ⚠️ **Silent data loss** ✅ FIXED
+  - Location: `RedisCommandHandler.cpp` → `handleHset()`
+  - Discovered: 2026-05-27 via `test_all.sh`
+  - Real Redis supports `HSET key f1 v1 f2 v2 ...` (multi-field, since Redis 4.0)
+  - Was: read only `tokens[2]`/`tokens[3]` — extra pairs silently dropped
+  - Fix: Loops through pairs; returns count of NEW fields added (per Redis spec, not just `:1`)
+  - Also: validates even token count to reject `HSET key f1 v1 f2` (stray field)
 
 #### Category B: Persistence Bugs (Silent Data Corruption ⚠️)
 
-- [ ] **String values with spaces break on load**
-  - Location: `RedisDatabase.cpp:359`
-  - `SET msg "hello world"` → dumps as `K msg hello world` → loads as `value="hello"` (lost "world")
-  - Fix: Use length-prefixed format (`K <keylen> <key> <vallen> <value>`)
-- [ ] **List items with spaces break on load**
-  - Same root cause — `>>` operator splits on whitespace
-  - `LPUSH list "hello world"` → loads as 2 separate items
-- [ ] **Hash values with spaces break on load**
-  - Even worse: hash entries become separate orphan tokens silently skipped
-- [ ] **Hash values with colons break on load**
-  - Parser does `pair.find(':')` — if value contains `:`, the wrong colon is used
-  - `HSET user url "http://x.com"` → field=`url`, value=`http`
-- [ ] **TTLs are not persisted**
-  - `expiry_map` is never dumped/loaded → all expirations lost on restart
-- [ ] **No corruption detection**
-  - No checksum, no version field, no sanity checks during load
-- [ ] **Dump blocks all reads/writes**
-  - `dump()` holds `db_mutex` for the entire serialization
-  - For a 1M-key DB, server is unresponsive for seconds
-  - Real Redis solution: `fork()` + copy-on-write for snapshot
+B1–B6 fixed together via one format change — see [`BUG_FIXES.md`](BUG_FIXES.md) for the full rationale and the cross-cutting format design.
+
+- [x] **String values with spaces break on load** ✅ FIXED
+  - Length-prefixed K records (`K <keylen> <key> <vallen> <value>`)
+- [x] **List items with spaces break on load** ✅ FIXED
+  - Length-prefixed L records (`L <keylen> <key> <count> <len> <item> ...`)
+- [x] **Hash values with spaces break on load** ✅ FIXED
+  - Length-prefixed H records (paired `<flen> <field> <vlen> <value>`)
+- [x] **Hash values with colons break on load** ✅ FIXED
+  - Eliminated by construction — no in-band delimiter in H records anymore
+- [x] **TTLs are not persisted** ✅ FIXED
+  - New E record type stores absolute unix epoch ms; converted to/from steady_clock at dump/load
+- [x] **No corruption detection** ✅ FIXED
+  - Added `REDIS_DUMP_V1` magic header + CRC32 over body; load refuses bad files (fail-loud)
+- [ ] **Dump blocks all reads/writes** ⏸️ **DEFERRED to after Phase 3 (epoll)**
+  - `dump()` still holds `db_mutex` for the entire serialization (now serialized to a memory buffer first, then written — slightly faster but still blocking)
+  - Real Redis solution: `fork()` + copy-on-write. Cleaner to do after Phase 3 when the I/O model is single-threaded by design (fork() in a multithreaded program is fragile).
 
 #### Category C: Input Validation Bugs
 
@@ -65,8 +69,10 @@
   - Wrapped parser body in try/catch — returns empty tokens on malformed input
 - [x] **`std::stoi` in handlers can also crash** ✅ VERIFIED — already wrapped in try/catch
   - Used in `handleExpire`, `handleLrem`, `handleLindex`, `handleLset`
-- [ ] **`keys()` may return duplicates**
-  - Iterates all 3 stores without dedup; harmless in practice but technically wrong
+- [x] **`keys()` may return duplicates** ✅ FIXED
+  - Location: `RedisDatabase.cpp:42-51`
+  - Was: iterated all 3 stores into a vector; a key in multiple stores appeared multiple times
+  - Fix: collect into `std::unordered_set` then convert to vector — O(N) dedup, no behavior change for callers
 
 #### Category D: Error Messages
 
@@ -80,15 +86,19 @@
 - [x] **No `SO_RCVTIMEO` set on client sockets** ⚠️ **slow loris vulnerability** ✅ FIXED
   - Attacker connects + sends nothing → thread blocked forever in `recv()`
   - Set 300-second idle timeout after `accept()` (RedisServer.cpp:86-90)
-- [ ] **No `SO_KEEPALIVE`** — dead clients leak threads
+- [x] **No `SO_KEEPALIVE`** — dead clients leak threads ✅ FIXED
+  - Location: `RedisServer.cpp:92-93`
+  - OS-level probes detect silently-dead clients (network failure, crash) so `recv()` returns instead of blocking forever
 - [ ] **Thread vector grows forever**
   - Location: `RedisServer.cpp:74`
   - `threads.emplace_back(...)` never removes finished threads
   - 10,000 disconnected clients = 10,000 stale thread objects
-- [ ] **Fixed 1024-byte recv buffer truncates large requests**
-  - Location: `RedisServer.cpp:86`
-  - Large `SET` values or `HMSET` calls get cut off
-  - Fix: Loop-read until full RESP message is parsed
+- [ ] **Fix 1024-byte recv buffer truncates large requests** ⏸️ **DEFERRED to Phase 3 (epoll)**
+  - Location: `RedisServer.cpp:96`
+  - Large `SET` values or `HMSET` calls get cut off; pipelined commands processed only partially
+  - Root cause: TCP is a byte stream, not a message protocol — one `send()` ≠ one `recv()`. Need application-layer framing (RESP's `*N\r\n` / `$N\r\n` length prefixes) + a per-client input buffer that accumulates bytes until a complete message is parseable.
+  - **Why deferred:** ~60% of the fix (blocking recv loop in a thread) would be throwaway once epoll lands. The RESP framing function and per-client buffer pattern get written natively in Phase 3, where non-blocking sockets make correct framing unavoidable. Concepts (TCP-as-stream, partial reads, framing) land better in that context.
+  
 - [x] **`purgeExpired()` is public but should be private** ✅ FIXED
   - Moved to private section in RedisDatabase.h
 - [x] **`purgeExpired()` not called by list/hash operations** ✅ FIXED
@@ -96,9 +106,12 @@
 - [ ] **Detached persistence thread has no clean shutdown**
   - Location: `main.cpp:28`
   - `persistanceThread.detach()` runs `while(true)` forever; relies on `exit()`
-- [ ] **Dead code in `RedisServer::run()` cleanup**
-  - Location: `RedisServer.cpp:99-107`
-  - `signalHandler` calls `exit(signum)` before `run()` ever reaches this code
+- [x] **Dead code in `RedisServer::run()` cleanup** ✅ FIXED (surgical — Group A)
+  - Removed unreachable cleanup block; left TODO marker
+  - Root cause (`exit()` in `signalHandler`) → see Group B item below
+- [ ] **`signalHandler` calls `exit()` — prevents proper shutdown cleanup** (Group B)
+  - Location: `RedisServer.cpp:22`
+  - When fixed alongside singleton + clean-shutdown signal, the natural cleanup at end of `run()` can be restored
 - [ ] **`globalServer` is a workaround**
   - Because `RedisServer` isn't a singleton, a global pointer is used to bridge into `signalHandler`
   - Cleaner: make `RedisServer` a singleton like `RedisDatabase`
@@ -110,8 +123,8 @@
 - [ ] **Vector for lists is poor choice for middle deletions**
   - `lrem` mode 2/3 is O(N×count) due to shifts
   - Real Redis uses a quicklist (linked list of vectors)
-- [ ] **`std::reverse_iterator<...>(fwdIter)` is verbose**
-  - Replace with `std::make_reverse_iterator(fwdIter)` (C++14)
+- [x] **`std::reverse_iterator<...>(fwdIter)` is verbose** ✅ FIXED
+  - Replaced with `std::make_reverse_iterator(fwdIter)` (RedisDatabase.cpp:228)
 
 ---
 
@@ -299,19 +312,20 @@ Use this as your tracker:
 - [x] Fix `del()` return value ✅
 - [x] Fix `del()` expiry leak ✅
 - [x] Fix `flushAll()` expiry leak ✅
+- [x] Fix `HSET` to handle multiple field/value pairs (silent data loss) ✅
 
 **Persistence (silent data corruption):**
-- [ ] Fix string values with spaces
-- [ ] Fix list items with spaces
-- [ ] Fix hash values with spaces
-- [ ] Fix hash values containing `:`
-- [ ] Persist TTLs in dump file
-- [ ] Add corruption detection (checksum)
-- [ ] Non-blocking dump (fork or async)
+- [x] Fix string values with spaces ✅
+- [x] Fix list items with spaces ✅
+- [x] Fix hash values with spaces ✅
+- [x] Fix hash values containing `:` ✅
+- [x] Persist TTLs in dump file ✅
+- [x] Add corruption detection (checksum) ✅
+- [ ] Non-blocking dump (fork or async) ⏸️ deferred to after Phase 3
 
 **Validation:**
 - [x] Wrap `std::stoi` calls in try/catch (parser) ✅ — handlers already had try/catch
-- [ ] Dedupe `keys()` output
+- [x] Dedupe `keys()` output ✅
 
 **Error messages:**
 - [x] Fix `handleHget` message ✅
@@ -319,18 +333,18 @@ Use this as your tracker:
 
 **Resources / Security:**
 - [x] Add `SO_RCVTIMEO` to prevent slow loris ✅
-- [ ] Add `SO_KEEPALIVE`
-- [ ] Prune finished threads from vector
-- [ ] Loop-read until full RESP message (fix 1024-byte truncation)
+- [x] Add `SO_KEEPALIVE` ✅
+- [ ] Prune finished threads from vector (Group B)
 - [x] Make `purgeExpired()` private ✅
 - [x] Call `purgeExpired()` in list/hash ops too ✅
-- [ ] Add clean shutdown signal for persistence thread
-- [ ] Remove dead code in `RedisServer::run()` cleanup
-- [ ] Replace `globalServer` with `RedisServer` singleton
+- [ ] Add clean shutdown signal for persistence thread (Group B)
+- [x] Remove dead code in `RedisServer::run()` cleanup ✅ (surgical fix; root cause deferred to Group B)
+- [ ] Remove `exit()` from `signalHandler` & restore cleanup (Group B)
+- [ ] Replace `globalServer` with `RedisServer` singleton (Group B)
 
 **Code smells (optional):**
 - [ ] Extract `resolveIndex()` helper for `lindex`/`lset`
-- [ ] Use `std::make_reverse_iterator` in `lrem`
+- [x] Use `std::make_reverse_iterator` in `lrem` ✅
 - [ ] Consider quicklist/deque for lists (real Redis approach)
 
 ### Phase 2: Testing
@@ -380,4 +394,4 @@ The **"tutorial follower → real engineer"** transition is one of the best thin
 ---
 
 **Created:** 2026-05-17
-**Last Updated:** 2026-05-17
+**Last Updated:** 2026-05-31
