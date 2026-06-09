@@ -89,10 +89,10 @@ B1–B6 fixed together via one format change — see [`BUG_FIXES.md`](BUG_FIXES.
 - [x] **No `SO_KEEPALIVE`** — dead clients leak threads ✅ FIXED
   - Location: `RedisServer.cpp:92-93`
   - OS-level probes detect silently-dead clients (network failure, crash) so `recv()` returns instead of blocking forever
-- [ ] **Thread vector grows forever**
-  - Location: `RedisServer.cpp:74`
-  - `threads.emplace_back(...)` never removes finished threads
+- [x] **Thread vector grows forever** ✅ FIXED (Group B)
+  - Was: `threads.emplace_back(...)` never removed finished threads
   - 10,000 disconnected clients = 10,000 stale thread objects
+  - Fix: per-worker `done` flag; accept loop reaps finished workers (join + erase); `shutdown()` joins the rest. Vector now tracks only live connections.
 - [ ] **Fix 1024-byte recv buffer truncates large requests** ⏸️ **DEFERRED to Phase 3 (epoll)**
   - Location: `RedisServer.cpp:96`
   - Large `SET` values or `HMSET` calls get cut off; pipelined commands processed only partially
@@ -103,18 +103,18 @@ B1–B6 fixed together via one format change — see [`BUG_FIXES.md`](BUG_FIXES.
   - Moved to private section in RedisDatabase.h
 - [x] **`purgeExpired()` not called by list/hash operations** ✅ FIXED
   - Added to all 9 list ops + all 9 hash ops
-- [ ] **Detached persistence thread has no clean shutdown**
-  - Location: `main.cpp:28`
-  - `persistanceThread.detach()` runs `while(true)` forever; relies on `exit()`
+- [x] **Detached persistence thread has no clean shutdown** ✅ FIXED (Group B)
+  - Was: `persistanceThread.detach()` ran `while(true)` forever; relied on `exit()`
+  - Fix: joinable thread parked on a `condition_variable` (300s timeout, wakes early on shutdown); `main()` signals stop + joins it. SIGINT blocked in the thread so only main fields Ctrl+C.
 - [x] **Dead code in `RedisServer::run()` cleanup** ✅ FIXED (surgical — Group A)
   - Removed unreachable cleanup block; left TODO marker
   - Root cause (`exit()` in `signalHandler`) → see Group B item below
-- [ ] **`signalHandler` calls `exit()` — prevents proper shutdown cleanup** (Group B)
-  - Location: `RedisServer.cpp:22`
-  - When fixed alongside singleton + clean-shutdown signal, the natural cleanup at end of `run()` can be restored
-- [ ] **`globalServer` is a workaround**
-  - Because `RedisServer` isn't a singleton, a global pointer is used to bridge into `signalHandler`
-  - Cleaner: make `RedisServer` a singleton like `RedisDatabase`
+- [x] **`signalHandler` calls `exit()` — prevents proper shutdown cleanup** ✅ FIXED (Group B)
+  - Was: `exit(signum)` in the handler killed the process before any cleanup
+  - Fix: handler now only sets a file-scope `std::atomic<bool> g_shutdown` (async-signal-safe); installed via `sigaction` without `SA_RESTART` so `accept()` returns `EINTR`. Real cleanup (dump + close + join) runs in `run()` on the main thread.
+- [x] **`globalServer` is a workaround** ✅ FIXED (Group B)
+  - Was: a global pointer bridged the C-style handler into `globalServer->shutdown()`
+  - Fix: deleted entirely. Once the handler only sets `g_shutdown`, no instance access is needed. (Singleton considered but rejected — a server needs a `port`, which makes singleton init awkward; a bare atomic removed the global with less code.)
 
 #### Category F: Code Smells (Nice to Have)
 
@@ -334,13 +334,13 @@ Use this as your tracker:
 **Resources / Security:**
 - [x] Add `SO_RCVTIMEO` to prevent slow loris ✅
 - [x] Add `SO_KEEPALIVE` ✅
-- [ ] Prune finished threads from vector (Group B)
+- [x] Prune finished threads from vector ✅ (Group B)
 - [x] Make `purgeExpired()` private ✅
 - [x] Call `purgeExpired()` in list/hash ops too ✅
-- [ ] Add clean shutdown signal for persistence thread (Group B)
-- [x] Remove dead code in `RedisServer::run()` cleanup ✅ (surgical fix; root cause deferred to Group B)
-- [ ] Remove `exit()` from `signalHandler` & restore cleanup (Group B)
-- [ ] Replace `globalServer` with `RedisServer` singleton (Group B)
+- [x] Add clean shutdown signal for persistence thread ✅ (Group B)
+- [x] Remove dead code in `RedisServer::run()` cleanup ✅
+- [x] Remove `exit()` from `signalHandler` & restore cleanup ✅ (Group B)
+- [x] Remove `globalServer` global (atomic flag, not singleton) ✅ (Group B)
 
 **Code smells (optional):**
 - [ ] Extract `resolveIndex()` helper for `lindex`/`lset`
@@ -394,4 +394,4 @@ The **"tutorial follower → real engineer"** transition is one of the best thin
 ---
 
 **Created:** 2026-05-17
-**Last Updated:** 2026-05-31
+**Last Updated:** 2026-06-09
