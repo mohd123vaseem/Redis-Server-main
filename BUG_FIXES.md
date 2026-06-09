@@ -528,6 +528,30 @@ Because the process died inside the handler:
 **Severity:** Correctness / data-safety — cleanup logic could never run
 **Location:** `RedisServer.cpp` — handler (`:17-23`), `setupSignalHandler()` (`:31-39`), accept loop (`:104-117`)
 
+#### What was actually broken (a common misconception)
+
+The obvious reading is: *"Ctrl+C didn't save RAM to the dump file before closing."* **That's not what was happening.** The old handler *did* call `dump()` and save — `signalHandler` → `shutdown()` → `dump()` → `close()` → `exit()`. In the normal case your data made it to disk just fine. So "it never saved" is the wrong mental model.
+
+The real bugs were subtler — and worse, because they were intermittent:
+
+**1. The save ran in a dangerous place — inside the signal handler.** A signal can interrupt the program at *any* instruction. Consider the timing:
+
+```
+Main thread is mid-way through  SET foo bar
+   → it currently HOLDS db_mutex
+You press Ctrl+C at that exact microsecond
+   → handler runs, calls dump()
+   → dump() tries to LOCK db_mutex... but the main thread already holds it
+   → and the main thread is frozen (the signal interrupted it)
+   → DEADLOCK — the save hangs forever and never completes.
+```
+
+So the save *could* fail (hang) — but only if the signal landed at the wrong instant. Most of the time it worked "by luck." That's the worst kind of bug: fine in testing, hangs in production under load. **A signal handler is simply the wrong place to do real work like file I/O or locking.**
+
+**2. `exit()` tore everything down abruptly instead of shutting down cleanly.** `exit()` doesn't wait for threads — it vaporizes the process: a client thread mid-request is killed instantly, the background persistence thread is abandoned, and the cleanup code at the end of `run()` is never reached (which is why it had already been deleted as dead code).
+
+**Accurate one-line summary:** *the save happened, but in an unsafe place where it could deadlock, and the shutdown tore everything down abruptly instead of cleanly.* The fix moves the save and the thread-joining onto the **main thread**, which does them *after* it notices the flag and steps out of `accept()` — no other thread holds a lock at that point, so the dump can't deadlock, and threads get joined instead of abandoned.
+
 #### Current behavior
 
 ```cpp
