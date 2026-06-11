@@ -5,6 +5,8 @@
 > **Audience:** Future-me reviewing the project, interviewers asking *"tell me about a bug you fixed,"* and anyone reading the codebase who wonders why something is the way it is.
 >
 > **Companion to:** [`IMPROVEMENT_PLAN.md`](IMPROVEMENT_PLAN.md) (the tracker — what's done, what's open). This doc is the *story* behind the checkboxes.
+>
+> **Verified by:** every fix below is exercised by [`test_all.sh`](test_all.sh) — run `make && ./test_all.sh` for an automated pass/fail regression of all of them.
 
 ---
 
