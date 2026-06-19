@@ -132,6 +132,9 @@ B1–B6 fixed together via one format change — see [`BUG_FIXES.md`](BUG_FIXES.
 
 **Why this matters:** *"I added a test suite"* is shorthand for *"I write production-quality code."* Zero-test projects scream "tutorial."
 
+> 📋 **Working tracker:** see [`TEST_STRATEGY.md`](TEST_STRATEGY.md) for the ordered step-by-step
+> plan, the reasoning behind the order, and which steps survive the Phase 3 (epoll) rewrite.
+
 #### Tasks
 
 - [ ] Integrate **Google Test** framework

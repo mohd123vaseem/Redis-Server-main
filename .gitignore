@@ -5,3 +5,6 @@ dump.my_rdb
 build
 
 my_redis_server
+
+# Vendored Google Test source (fetched via `make gtest`, not committed)
+third_party
