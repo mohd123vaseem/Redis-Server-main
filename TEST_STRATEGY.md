@@ -5,7 +5,7 @@
 > and *why that order* — so we don't lose the thread across sessions.
 
 **Created:** 2026-06-19
-**Status:** Step 1 complete ✅ — scaffold verified green (`make gtest` + `make test`, 1 test passing)
+**Status:** Steps 1 & 2 complete ✅ — `make test` green, 37 RedisDatabase unit tests passing (2 ms)
 
 ---
 
@@ -66,21 +66,25 @@ bug fixes, but it is **not** the Phase 2 deliverable:
 
 ---
 
-### Step 2 — Unit tests for `RedisDatabase` (the data layer) ⭐
+### Step 2 — Unit tests for `RedisDatabase` (the data layer) ⭐ ✅ DONE
 
-Test each operation **directly** (no socket). Use a fixture that calls `flushAll()` in `SetUp()`.
+37 tests in `tests/test_database.cpp`, fixture resets the singleton via `flushAll()` in
+`SetUp()`. **Verified green 2026-06-19** (`make test`, 37 passing, 2 ms).
 
-- [ ] Key/Value: `set`/`get`, `get` of missing key, `type`, `rename`
-- [ ] `del` — returns `true`/`1` on hit, `false`/`0` on miss (Phase 1 bug A1)
-- [ ] `del` — clears the TTL so a re-added key does not inherit old expiry (bug A2)
-- [ ] `flushAll` — clears the TTL map too (bug A3)
-- [ ] `keys()` — no duplicates when a name exists in multiple stores (bug C3)
-- [ ] List: `lpush`/`rpush`/`lpop`/`rpop`/`llen`/`lindex`/`lset`
-- [ ] `lrem` — all three modes (count > 0, count < 0, count == 0)
-- [ ] Hash: `hset` single + **multi-field** (bug A4), `hget`, `hdel`, `hexists`, `hlen`, `hgetall`, `hkeys`, `hvals`, `hmset`
-- [ ] Expiry: `expire` then immediate read = present; after timeout = gone (lazy purge)
-- [ ] Persistence round-trip: `dump()` then `load()` preserves values with **spaces and colons** (bugs B1–B4) and TTLs (B5)
-- [ ] Persistence: `load()` rejects a corrupted dump — bad magic header / bad CRC (bug B6)
+- [x] Key/Value: `set`/`get`, `get` of missing key, `type`, `rename`
+- [x] `del` — returns `true` on hit, `false` on miss (Phase 1 bug A1)
+- [x] `del` — clears the TTL so a re-added key does not inherit old expiry (bug A2) — verified deterministically via dump inspection (no sleeps)
+- [x] `flushAll` — clears the TTL map too (bug A3)
+- [x] `keys()` — no duplicates when a name exists in multiple stores (bug C3)
+- [x] List: `lpush`/`rpush`/`lpop`/`rpop`/`llen`/`lindex`/`lset`
+- [x] `lrem` — all three modes (count > 0, count < 0, count == 0)
+- [x] Hash: `hget`, `hdel`, `hexists`, `hlen`, `hgetall`, `hkeys`, `hvals`, `hmset` (multi-field at DB layer)
+- [x] Persistence round-trip: `dump()` then `load()` preserves values with **spaces and colons** (bugs B1–B4) and TTLs (B5)
+- [x] Persistence: `load()` rejects a corrupted dump — missing file / bad magic header / bad CRC (bug B6), without wiping good in-memory data
+
+**Note — moved to Step 4 (integration):** multi-field `HSET` (bug A4) lives in
+`RedisCommandHandler::handleHset`, not the DB layer (`db.hset` is single-field; `db.hmset`
+covers multi-field and is tested here). Timing-based TTL *expiry* stays in `test_all.sh`.
 
 **Why second:** pure logic, easiest to isolate; **survives the epoll rewrite untouched**;
 locks in the Phase 1 bug fixes at the unit level instead of only end-to-end.
@@ -153,7 +157,7 @@ add lighter concurrency checks after epoll lands.
 ## Tracker Summary
 
 - [x] Step 1 — GoogleTest scaffold + 1 test ✅
-- [ ] Step 2 — RedisDatabase unit tests
+- [x] Step 2 — RedisDatabase unit tests ✅ (37 tests)
 - [ ] Step 3 — GitHub Actions CI + badge
 - [ ] Step 4 — RESP parser integration tests
 - [ ] Step 5 — Concurrency tests *(optional / decide first)*
