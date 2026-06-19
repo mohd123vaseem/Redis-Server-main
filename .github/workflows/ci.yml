@@ -1,0 +1,37 @@
+name: CI
+
+# Run on every push to main and on every pull request, so broken code is
+# caught before it lands.
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      # test_all.sh drives the server with redis-cli, which ships in redis-tools.
+      - name: Install redis-cli
+        run: sudo apt-get update && sudo apt-get install -y redis-tools
+
+      # Vendored Google Test isn't committed (third_party/ is gitignored), so
+      # fetch it on the runner before building the unit tests.
+      - name: Fetch Google Test
+        run: make gtest
+
+      # Build the server binary (test_all.sh needs ./my_redis_server).
+      - name: Build server
+        run: make
+
+      # Unit tests — fails the job (non-zero exit) if any test is red.
+      - name: Unit tests (Google Test)
+        run: make test
+
+      # End-to-end regression harness for the documented bug fixes.
+      - name: Integration regression harness
+        run: ./test_all.sh

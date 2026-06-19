@@ -1,4 +1,7 @@
 # Welcome to My Cpp Redis Server
+
+[![CI](https://github.com/mohd123vaseem/Redis-Server-main/actions/workflows/ci.yml/badge.svg)](https://github.com/mohd123vaseem/Redis-Server-main/actions/workflows/ci.yml)
+
 ***
 
 **Step‑by‑Step Video Tutorial:** Watch the full implementation from start to finish on YouTube:\
