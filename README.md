@@ -1,6 +1,7 @@
 # Welcome to My Cpp Redis Server
 
 [![CI](https://github.com/mohd123vaseem/Redis-Server-main/actions/workflows/ci.yml/badge.svg)](https://github.com/mohd123vaseem/Redis-Server-main/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/mohd123vaseem/Redis-Server-main/branch/main/graph/badge.svg)](https://codecov.io/gh/mohd123vaseem/Redis-Server-main)
 
 ***
 

@@ -130,7 +130,10 @@ parsing a *complete* RESP message does not). Higher setup cost than data-layer t
 Do this now only for the *"I verified mutex correctness"* talking point; otherwise skip and
 add lighter concurrency checks after epoll lands.
 
-**Decision needed before starting Step 5:** do it now, or defer past Phase 3? *(unresolved)*
+**Decision (2026-06-20): DEFERRED past Phase 3.** Concurrency tests validate the
+thread-per-client `db_mutex` model, which the epoll rewrite removes — writing them now
+would mean testing code about to be deleted. Revisit after epoll with tests that match
+the single-threaded event-loop architecture.
 
 ---
 
@@ -165,5 +168,5 @@ add lighter concurrency checks after epoll lands.
 - [x] Step 2 — RedisDatabase unit tests ✅ (37 tests)
 - [x] Step 3 — GitHub Actions CI + badge ✅ (first run green, 55s)
 - [x] Step 4 — RESP parser integration tests ✅ (19 tests, 56 total)
-- [ ] Step 5 — Concurrency tests *(optional / decide first)*
-- [ ] Step 6 — Coverage badge
+- [⏸] Step 5 — Concurrency tests — **DEFERRED past Phase 3** (decided 2026-06-20)
+- [ ] Step 6 — Coverage badge ← in progress

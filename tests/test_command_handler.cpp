@@ -161,3 +161,105 @@ TEST_F(CommandHandlerTest, HsetRejectsOddFieldValueArgs) {
     EXPECT_EQ(handler.processCommand(resp({"HSET", "user", "name", "Alice", "age"})),
               "-Error: HSET requires key followed by one or more field value pairs\r\n");
 }
+
+// ===========================================================================
+// Remaining handlers — drive each command through processCommand so the
+// command layer (not just the DB) is exercised. (Step 6: raise coverage.)
+// ===========================================================================
+TEST_F(CommandHandlerTest, FlushAllClearsEverything) {
+    handler.processCommand(resp({"SET", "foo", "bar"}));
+    EXPECT_EQ(handler.processCommand(resp({"FLUSHALL"})), "+OK\r\n");
+    EXPECT_EQ(handler.processCommand(resp({"KEYS", "*"})), "*0\r\n");
+}
+
+TEST_F(CommandHandlerTest, TypeReportsEachStore) {
+    handler.processCommand(resp({"SET", "s", "v"}));
+    handler.processCommand(resp({"RPUSH", "l", "a"}));
+    handler.processCommand(resp({"HSET", "h", "f", "v"}));
+    EXPECT_EQ(handler.processCommand(resp({"TYPE", "s"})), "+string\r\n");
+    EXPECT_EQ(handler.processCommand(resp({"TYPE", "l"})), "+list\r\n");
+    EXPECT_EQ(handler.processCommand(resp({"TYPE", "h"})), "+hash\r\n");
+    EXPECT_EQ(handler.processCommand(resp({"TYPE", "missing"})), "+none\r\n");
+}
+
+TEST_F(CommandHandlerTest, RenameSucceedsAndFails) {
+    handler.processCommand(resp({"SET", "a", "1"}));
+    EXPECT_EQ(handler.processCommand(resp({"RENAME", "a", "b"})), "+OK\r\n");
+    EXPECT_EQ(handler.processCommand(resp({"GET", "b"})), "$1\r\n1\r\n");
+    EXPECT_EQ(handler.processCommand(resp({"RENAME", "ghost", "x"})),
+              "-Error: Key not found or rename failed\r\n");
+}
+
+TEST_F(CommandHandlerTest, ExpireSuccessAndMissingKey) {
+    handler.processCommand(resp({"SET", "k", "v"}));
+    EXPECT_EQ(handler.processCommand(resp({"EXPIRE", "k", "100"})), "+OK\r\n");
+    EXPECT_EQ(handler.processCommand(resp({"EXPIRE", "ghost", "100"})),
+              "-Error: Key not found\r\n");
+}
+
+// ---- List handlers ----
+TEST_F(CommandHandlerTest, LpushReturnsLengthAndLgetReturnsItems) {
+    EXPECT_EQ(handler.processCommand(resp({"LPUSH", "l", "a", "b"})), ":2\r\n");
+    // lpush a then b -> [b, a]
+    EXPECT_EQ(handler.processCommand(resp({"LGET", "l"})),
+              "*2\r\n$1\r\nb\r\n$1\r\na\r\n");
+}
+
+TEST_F(CommandHandlerTest, LlenReturnsCount) {
+    handler.processCommand(resp({"RPUSH", "l", "a", "b", "c"}));
+    EXPECT_EQ(handler.processCommand(resp({"LLEN", "l"})), ":3\r\n");
+}
+
+TEST_F(CommandHandlerTest, LpopAndRpopAndNil) {
+    handler.processCommand(resp({"RPUSH", "l", "a", "b", "c"}));
+    EXPECT_EQ(handler.processCommand(resp({"LPOP", "l"})), "$1\r\na\r\n");
+    EXPECT_EQ(handler.processCommand(resp({"RPOP", "l"})), "$1\r\nc\r\n");
+    handler.processCommand(resp({"FLUSHALL"}));
+    EXPECT_EQ(handler.processCommand(resp({"LPOP", "missing"})), "$-1\r\n");
+}
+
+TEST_F(CommandHandlerTest, LremCountAndInvalidCount) {
+    handler.processCommand(resp({"RPUSH", "l", "a", "b", "a"}));
+    EXPECT_EQ(handler.processCommand(resp({"LREM", "l", "0", "a"})), ":2\r\n");
+    EXPECT_EQ(handler.processCommand(resp({"LREM", "l", "xx", "a"})),
+              "-Error: Invalid count\r\n");
+}
+
+TEST_F(CommandHandlerTest, LindexAndLsetSuccessAndOutOfRange) {
+    handler.processCommand(resp({"RPUSH", "l", "a", "b"}));
+    EXPECT_EQ(handler.processCommand(resp({"LINDEX", "l", "0"})), "$1\r\na\r\n");
+    EXPECT_EQ(handler.processCommand(resp({"LINDEX", "l", "9"})), "$-1\r\n");      // out of range
+    EXPECT_EQ(handler.processCommand(resp({"LSET", "l", "0", "X"})), "+OK\r\n");
+    EXPECT_EQ(handler.processCommand(resp({"LSET", "l", "9", "X"})),
+              "-Error: Index out of range\r\n");
+}
+
+// ---- Hash handlers ----
+TEST_F(CommandHandlerTest, HexistsAndHdelReplies) {
+    handler.processCommand(resp({"HSET", "h", "f", "v"}));
+    EXPECT_EQ(handler.processCommand(resp({"HEXISTS", "h", "f"})), ":1\r\n");
+    EXPECT_EQ(handler.processCommand(resp({"HEXISTS", "h", "x"})), ":0\r\n");
+    EXPECT_EQ(handler.processCommand(resp({"HDEL", "h", "f"})), ":1\r\n");
+    EXPECT_EQ(handler.processCommand(resp({"HDEL", "h", "f"})), ":0\r\n");   // already gone
+}
+
+TEST_F(CommandHandlerTest, HgetallHkeysHvalsHlen) {
+    handler.processCommand(resp({"HSET", "h", "field", "value"}));   // single field -> deterministic
+    EXPECT_EQ(handler.processCommand(resp({"HGETALL", "h"})),
+              "*2\r\n$5\r\nfield\r\n$5\r\nvalue\r\n");
+    EXPECT_EQ(handler.processCommand(resp({"HKEYS", "h"})), "*1\r\n$5\r\nfield\r\n");
+    EXPECT_EQ(handler.processCommand(resp({"HVALS", "h"})), "*1\r\n$5\r\nvalue\r\n");
+    EXPECT_EQ(handler.processCommand(resp({"HLEN", "h"})), ":1\r\n");
+}
+
+TEST_F(CommandHandlerTest, HmsetStoresPairsAndRejectsBadArity) {
+    EXPECT_EQ(handler.processCommand(resp({"HMSET", "h", "a", "1", "b", "2"})), "+OK\r\n");
+    EXPECT_EQ(handler.processCommand(resp({"HGET", "h", "b"})), "$1\r\n2\r\n");
+    EXPECT_EQ(handler.processCommand(resp({"HMSET", "h", "a"})),
+              "-Error: HMSET requires key followed by field value pairs\r\n");
+}
+
+TEST_F(CommandHandlerTest, GetAndEchoArityErrors) {
+    EXPECT_EQ(handler.processCommand(resp({"GET"})), "-Error: GET requires key\r\n");
+    EXPECT_EQ(handler.processCommand(resp({"ECHO"})), "-Error: ECHO requires a message\r\n");
+}

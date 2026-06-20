@@ -35,3 +35,26 @@ jobs:
       # End-to-end regression harness for the documented bug fixes.
       - name: Integration regression harness
         run: ./test_all.sh
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Install gcovr
+        run: sudo apt-get update && sudo apt-get install -y gcovr
+
+      - name: Fetch Google Test
+        run: make gtest
+
+      # Build instrumented tests, run them, emit build/cov/coverage.xml.
+      - name: Generate coverage
+        run: make coverage
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: build/cov/coverage.xml
+          fail_ci_if_error: false

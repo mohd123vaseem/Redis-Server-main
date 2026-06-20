@@ -71,4 +71,42 @@ $(TEST_BIN): $(TEST_OBJS) $(TESTABLE_OBJS) $(BUILD_DIR)/gtest-all.o $(BUILD_DIR)
 test: $(TEST_BIN)
 	./$(TEST_BIN)
 
-.PHONY: all clean rebuild run gtest test
+# ----------------------------------------------------------------------------
+# Coverage (Phase 2, Step 6): compile the code under test + tests WITH gcov
+# instrumentation (--coverage), run them, then summarise with gcovr.
+#
+# Only src/RedisDatabase.cpp and src/RedisCommandHandler.cpp are instrumented
+# (the layers the unit tests exercise). RedisServer.cpp is networking, covered
+# by test_all.sh, so it's excluded here. Google Test itself is reused
+# un-instrumented (we don't measure the framework's own coverage).
+#
+# Needs gcovr:  sudo apt-get install -y gcovr
+# ----------------------------------------------------------------------------
+COV_DIR      = $(BUILD_DIR)/cov
+COV_CXXFLAGS = -std=c++17 -pthread -O0 -g --coverage
+COV_SRC_OBJS = $(COV_DIR)/RedisDatabase.o $(COV_DIR)/RedisCommandHandler.o
+COV_TEST_OBJS = $(patsubst $(TEST_DIR)/%.cpp, $(COV_DIR)/%.test.o, $(TEST_SRCS))
+COV_BIN      = $(COV_DIR)/run_tests_cov
+
+$(COV_DIR):
+	mkdir -p $(COV_DIR)
+
+$(COV_DIR)/%.o: $(SRC_DIR)/%.cpp | $(COV_DIR)
+	$(CXX) $(COV_CXXFLAGS) $(GTEST_INC) -c $< -o $@
+
+$(COV_DIR)/%.test.o: $(TEST_DIR)/%.cpp | $(COV_DIR)
+	$(CXX) $(COV_CXXFLAGS) $(GTEST_INC) -c $< -o $@
+
+# Instrumented objects link with the (un-instrumented) gtest objects; --coverage
+# on the link line pulls in libgcov.
+coverage: $(COV_SRC_OBJS) $(COV_TEST_OBJS) $(BUILD_DIR)/gtest-all.o $(BUILD_DIR)/gtest_main.o
+	$(CXX) $(COV_CXXFLAGS) $^ -o $(COV_BIN)
+	./$(COV_BIN)
+	gcovr --root . --filter 'src/' --print-summary \
+	      --xml-pretty --output $(COV_DIR)/coverage.xml \
+	      --html-details $(COV_DIR)/coverage.html
+	@echo "----------------------------------------------------------------"
+	@echo "Coverage XML  -> $(COV_DIR)/coverage.xml   (for Codecov upload)"
+	@echo "Coverage HTML -> $(COV_DIR)/coverage.html  (open in a browser)"
+
+.PHONY: all clean rebuild run gtest test coverage
