@@ -1,0 +1,24 @@
+# Codecov configuration.
+#
+# Badge color is a linear gradient across `range`: red at the low end, green at
+# the high end. We set the high end to 90, so the badge is only fully GREEN at
+# 90%+ coverage. At the current ~86% it stays yellow — an honest signal that
+# we're close but not yet at the 90% bar. (It's a gradient, not a hard switch,
+# so values just under 90 trend yellow-green.)
+coverage:
+  precision: 1
+  round: down
+  range: "70...90"
+
+  status:
+    # Project-level check: don't fail CI for tiny coverage dips.
+    project:
+      default:
+        target: auto
+        threshold: 1%
+    # Patch coverage (coverage of just the changed lines) is strict on small
+    # diffs; keep it off so it doesn't red-X pull requests on a solo project.
+    patch: false
+
+# No automated coverage comment on pull requests — the badge is enough.
+comment: false
