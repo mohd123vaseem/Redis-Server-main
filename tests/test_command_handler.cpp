@@ -263,3 +263,34 @@ TEST_F(CommandHandlerTest, GetAndEchoArityErrors) {
     EXPECT_EQ(handler.processCommand(resp({"GET"})), "-Error: GET requires key\r\n");
     EXPECT_EQ(handler.processCommand(resp({"ECHO"})), "-Error: ECHO requires a message\r\n");
 }
+
+// Every remaining handler's arity guard (the "called with too few args" branch).
+// These were the uncovered red lines in the coverage report.
+TEST_F(CommandHandlerTest, AllArityGuardsReturnTheirError) {
+    EXPECT_EQ(handler.processCommand(resp({"TYPE"})),    "-Error: TYPE requires key\r\n");
+    EXPECT_EQ(handler.processCommand(resp({"DEL"})),     "-Error: DEL requires key\r\n");
+    EXPECT_EQ(handler.processCommand(resp({"EXPIRE", "k"})),
+              "-Error: EXPIRE requires key and time in seconds\r\n");
+    EXPECT_EQ(handler.processCommand(resp({"RENAME", "a"})),
+              "-Error: RENAME requires old key and new key\r\n");
+    EXPECT_EQ(handler.processCommand(resp({"LGET"})),    "-Error: LGET requires a key\r\n");
+    EXPECT_EQ(handler.processCommand(resp({"LLEN"})),    "-Error: LLEN requires key\r\n");
+    EXPECT_EQ(handler.processCommand(resp({"LPUSH", "l"})),
+              "-Error: LPUSH requires key and value\r\n");
+    EXPECT_EQ(handler.processCommand(resp({"RPUSH", "l"})),
+              "-Error: RPUSH requires key and value\r\n");
+    EXPECT_EQ(handler.processCommand(resp({"LPOP"})),    "-Error: LPOP requires key\r\n");
+    EXPECT_EQ(handler.processCommand(resp({"RPOP"})),    "-Error: RPOP requires key\r\n");
+    EXPECT_EQ(handler.processCommand(resp({"LREM", "l", "0"})),
+              "-Error: LREM requires key, count and value\r\n");
+    EXPECT_EQ(handler.processCommand(resp({"LINDEX", "l"})),
+              "-Error: LINDEX requires key and index\r\n");
+    EXPECT_EQ(handler.processCommand(resp({"HEXISTS", "h"})),
+              "-Error: HEXISTS requires key and field\r\n");
+    EXPECT_EQ(handler.processCommand(resp({"HDEL", "h"})),
+              "-Error: HDEL requires key and field\r\n");
+    EXPECT_EQ(handler.processCommand(resp({"HGETALL"})), "-Error: HGETALL requires key\r\n");
+    EXPECT_EQ(handler.processCommand(resp({"HKEYS"})),   "-Error: HKEYS requires key\r\n");
+    EXPECT_EQ(handler.processCommand(resp({"HVALS"})),   "-Error: HVALS requires key\r\n");
+    EXPECT_EQ(handler.processCommand(resp({"HLEN"})),    "-Error: HLEN requires key\r\n");
+}

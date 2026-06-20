@@ -179,6 +179,35 @@ TEST_F(RedisDatabaseTest, ExpireReturnsFalseForMissingKey) {
     EXPECT_FALSE(db.expire("ghost", 100));
 }
 
+// Covers the purgeExpired() removal branch deterministically: a TTL set in the
+// past (-1s) means the next access must purge the key — no sleep needed.
+TEST_F(RedisDatabaseTest, ExpiredKeyIsPurgedOnAccess) {
+    db.set("k", "v");
+    ASSERT_TRUE(db.expire("k", -1));   // already expired
+    std::string value;
+    EXPECT_FALSE(db.get("k", value));  // lazily purged on read
+    EXPECT_TRUE(db.keys().empty());    // gone from every store
+}
+
+// Covers rename()'s list, hash, and TTL move-branches (the string branch is
+// covered by RenameMovesValue above).
+TEST_F(RedisDatabaseTest, RenameMovesListHashAndTtl) {
+    db.rpush("l1", "a");
+    db.hset("h1", "f", "v");
+    db.set("k1", "v");
+    ASSERT_TRUE(db.expire("k1", 1000));   // k1 carries a TTL -> exercises expiry_map move
+
+    ASSERT_TRUE(db.rename("l1", "l2"));
+    EXPECT_EQ(db.llen("l2"), 1);
+
+    ASSERT_TRUE(db.rename("h1", "h2"));
+    std::string v;
+    EXPECT_TRUE(db.hget("h2", "f", v));
+
+    ASSERT_TRUE(db.rename("k1", "k2"));
+    EXPECT_TRUE(db.get("k2", v));
+}
+
 // ===========================================================================
 // List operations
 // ===========================================================================
