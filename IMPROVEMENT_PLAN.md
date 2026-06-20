@@ -137,17 +137,20 @@ B1–B6 fixed together via one format change — see [`BUG_FIXES.md`](BUG_FIXES.
 
 #### Tasks
 
-- [ ] Integrate **Google Test** framework
-- [ ] Unit tests for each database operation
-  - Set/Get, List ops, Hash ops, Expiry
-- [ ] Integration tests for RESP protocol
-  - Valid commands, malformed input, edge cases
-- [ ] Concurrency tests
+- [x] Integrate **Google Test** framework ✅ — vendored under `third_party/`, `make test` target
+- [x] Unit tests for each database operation ✅ — 37 tests (`tests/test_database.cpp`)
+  - Set/Get, List ops, Hash ops, Expiry, persistence round-trip, corruption detection
+- [x] Integration tests for RESP protocol ✅ — 19 tests (`tests/test_command_handler.cpp`)
+  - Valid commands, malformed input (no crash), inline + array framing, error messages
+- [ ] Concurrency tests ⏸️ **decision pending** — defer to after Phase 3 (epoll makes the
+  server single-threaded, so most of these would be throwaway)
   - Multiple threads hitting same key simultaneously
   - Verify mutex correctness
-- [ ] Set up **GitHub Actions CI**
-  - Build + test on every push
-- [ ] Add code coverage reporting (e.g., `gcov` + Codecov badge)
+- [x] Set up **GitHub Actions CI** ✅ — `.github/workflows/ci.yml`, first run green in 55s
+  - Build + unit tests + `test_all.sh` on every push and PR
+- [ ] Add code coverage reporting (e.g., `gcov` + Codecov badge) — Step 6, not yet started
+
+**Status (2026-06-20):** 56 tests passing locally and in CI. See [`TEST_STRATEGY.md`](TEST_STRATEGY.md).
 
 #### Outcome
 
@@ -351,12 +354,12 @@ Use this as your tracker:
 - [ ] Consider quicklist/deque for lists (real Redis approach)
 
 ### Phase 2: Testing
-- [ ] Set up Google Test
-- [ ] Unit tests for DB operations
-- [ ] Integration tests for RESP
-- [ ] Concurrency tests
-- [ ] GitHub Actions CI
-- [ ] Coverage badge
+- [x] Set up Google Test ✅
+- [x] Unit tests for DB operations ✅ (37)
+- [x] Integration tests for RESP ✅ (19)
+- [ ] Concurrency tests ⏸️ (deferred to after Phase 3 — decision pending)
+- [x] GitHub Actions CI ✅ (green, 55s)
+- [ ] Coverage badge (Step 6)
 
 ### Phase 3: epoll
 - [ ] Non-blocking sockets
@@ -397,4 +400,4 @@ The **"tutorial follower → real engineer"** transition is one of the best thin
 ---
 
 **Created:** 2026-05-17
-**Last Updated:** 2026-06-09
+**Last Updated:** 2026-06-20

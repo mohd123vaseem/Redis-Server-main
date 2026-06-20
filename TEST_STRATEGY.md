@@ -5,7 +5,7 @@
 > and *why that order* — so we don't lose the thread across sessions.
 
 **Created:** 2026-06-19
-**Status:** Steps 1 & 2 complete ✅ — `make test` green, 37 RedisDatabase unit tests passing (2 ms)
+**Status:** Steps 1–4 complete ✅ — 56 tests green (37 RedisDatabase + 19 RedisCommandHandler) locally and in GitHub Actions CI. `test_all.sh` also green.
 
 ---
 
@@ -91,24 +91,29 @@ locks in the Phase 1 bug fixes at the unit level instead of only end-to-end.
 
 ---
 
-### Step 3 — GitHub Actions CI + badge
+### Step 3 — GitHub Actions CI + badge ✅ DONE
 
-- [ ] Add `.github/workflows/ci.yml`
-- [ ] CI steps: check out → install `redis-cli` → `make` → `make test` → `./test_all.sh`
-- [ ] Confirm the workflow goes green on a push
-- [ ] Add the `![CI](...)` "passing" badge to `README.md`
+- [x] Add `.github/workflows/ci.yml`
+- [x] CI steps: check out → install `redis-cli` → `make gtest` → `make` → `make test` → `./test_all.sh`
+- [x] Confirm the workflow goes green on a push — **first run passed in 55s (2026-06-19)**
+- [x] Add the `![CI](...)` "passing" badge to `README.md`
 
 **Why here, not last:** CI's value compounds the longer it runs; the green badge is
 motivating; and it catches breakage *while* the rest of the tests are still being written.
 
 ---
 
-### Step 4 — Integration tests for the RESP parser (`RedisCommandHandler`)
+### Step 4 — Integration tests for the RESP parser (`RedisCommandHandler`) ✅ DONE
 
-- [ ] Feed raw RESP byte-strings, assert the parsed command tokens
-- [ ] Malformed input does not crash (e.g. `*abc\r\n...`) — bug C1
-- [ ] Correct error messages: HGET names "HGET", LSET names "LSET" (bugs D1/D2)
-- [ ] Edge cases: empty array, wrong arg counts, inline vs array form
+19 tests in `tests/test_command_handler.cpp`, driving `processCommand(string) -> string`
+directly (no socket). Fixture resets the DB singleton in `SetUp()`. **Verified green
+2026-06-20** (`make test`, 56 total passing).
+
+- [x] Feed raw RESP frames + inline fallback, assert the RESP reply
+- [x] Malformed input does not crash (`*abc\r\n...`, via `EXPECT_NO_THROW`) — bug C1
+- [x] Correct error messages: HGET names "HGET" not "HSET" (D1); LSET names "LSET" not "LEST" (D2)
+- [x] Multi-field `HSET` stores every pair + counts only new fields (A4); rejects odd args
+- [x] Edge cases: empty input, unknown command, case-insensitivity, arity errors, reply formatting (bulk/nil/integer/array)
 
 **Why fourth:** parser logic also **survives epoll** (framing changes in Phase 3, but
 parsing a *complete* RESP message does not). Higher setup cost than data-layer tests.
@@ -158,7 +163,7 @@ add lighter concurrency checks after epoll lands.
 
 - [x] Step 1 — GoogleTest scaffold + 1 test ✅
 - [x] Step 2 — RedisDatabase unit tests ✅ (37 tests)
-- [ ] Step 3 — GitHub Actions CI + badge
-- [ ] Step 4 — RESP parser integration tests
+- [x] Step 3 — GitHub Actions CI + badge ✅ (first run green, 55s)
+- [x] Step 4 — RESP parser integration tests ✅ (19 tests, 56 total)
 - [ ] Step 5 — Concurrency tests *(optional / decide first)*
 - [ ] Step 6 — Coverage badge
