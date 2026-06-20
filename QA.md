@@ -2798,4 +2798,287 @@ Fix: Length-prefixed encoding (like RESP)
 
 ---
 
-**Last Updated:** 2026-04-25
+# Phase 3 — epoll: Questions & Answers
+
+> Beginner-friendly Q&A captured while planning the `epoll` event-loop rewrite (Phase 3).
+> Companion to [`PHASE3_EPOLL_PLAN.md`](PHASE3_EPOLL_PLAN.md). Built up from analogies, no jargon dumps.
+
+---
+
+## Q24: What is `epoll`? Why use it, and how will we implement it?
+
+**Question:**
+> Explain epoll simply — what is it, why are we using it, and how will we implement it in our project (architecture level)?
+
+**Answer:**
+
+### What we have now (the problem)
+
+Today the server uses **one thread per client**. A thread is like a **worker employee**:
+
+- Client connects → the server hires **one dedicated worker** for that client.
+- That worker **waits** for the client to send a command. While waiting, it does nothing — it's *blocked*.
+- 1,000 clients → 1,000 workers, most just standing around.
+
+**Restaurant analogy:** one waiter per table. A table reading the menu still has a waiter frozen next to it, unable to help anyone else. 1,000 tables = 1,000 waiters — expensive (~1 MB memory each) and chaotic (constant switching). This is the classic **C10K problem** — can you handle 10,000 clients at once? Not this way.
+
+### What epoll is
+
+> **epoll is a Linux feature that lets ONE worker watch THOUSANDS of clients at once, and act only on the ones that need attention right now.**
+
+Instead of one waiter per table, you have **one smart waiter with a magic notepad** that says exactly which tables just raised their hand. The waiter ignores everyone reading the menu and only serves tables ready to order. That notepad is epoll:
+
+- You tell epoll: *"watch these 1,000 connections."*
+- Your one thread calls **`epoll_wait()`**, which **sleeps** until something happens.
+- epoll wakes the thread and hands it a **list of just the clients that are ready**.
+- Handle those, loop back, wait again.
+
+So instead of 1,000 blocked threads, you have **1 thread** that's either working or efficiently sleeping. Redis, nginx, and Node.js all work this way.
+
+### Why we're switching
+
+| | Now (thread-per-client) | With epoll |
+|---|---|---|
+| Workers | 1 per client | **1 total** |
+| Memory per client | ~1 MB | a few KB |
+| Realistic limit | ~1,000 clients | 10,000–100,000 |
+
+### How we'll implement it (architecture)
+
+Everything epoll watches is a **file descriptor**. The server becomes one loop:
+
+```
+   ┌──────────── the event loop (one thread) ───────────┐
+   │   epoll_wait()  ←— sleeps until something is ready  │
+   │        ├─ listening socket ready? → NEW client      │
+   │        ├─ a client sent data?     → read, run, reply│
+   │        └─ Ctrl+C signal?          → shut down       │
+   │   ...loop back to epoll_wait()                      │
+   └─────────────────────────────────────────────────────┘
+```
+
+1. **The accept loop** (`RedisServer::run`) becomes the event loop — no thread per client; we register each new client with epoll.
+2. **Each client gets a small "state folder"** instead of a thread — two buffers (bytes in, bytes out). Needed because a client may send half a command now, the rest later → we **accumulate** bytes until a full command arrives (**framing**).
+3. **The command brain is untouched** — `processCommand()` and the database stay the same. We only change *how bytes reach* the brain, which is why all 72 tests keep passing.
+
+**The one genuinely new concept — framing:** with one shared worker, a client might dribble in `SET na`… then `me bob`. The loop must collect the pieces and recognise a complete command before running it. That's `respFrameLength()` — built and unit-tested first, with no networking.
+
+---
+
+## Q25: How do `epoll`, sockets, and file descriptors work together?
+
+**Question:**
+> What is a file descriptor, what is a socket, and how do these three (epoll, socket, fd) work together?
+
+**Answer:**
+
+### File descriptor (fd) — "a ticket number"
+
+In Linux, *"everything is a file."* When your program **opens** anything (file, network connection, signal), the OS keeps the real thing and hands you back a **small integer** — the file descriptor.
+
+**Analogy:** a coat-check. You hand over your coat, they keep it, you get **ticket #42**. You refer to the coat by its number. `open a file → fd 3`, `open a connection → fd 5`.
+
+### Socket — "a phone line"
+
+A **socket** is one kind of thing you can open: an **endpoint for network communication**. A client connection *is* a socket. You talk to a socket **through its fd**:
+- `recv(fd, ...)` = "listen on phone line #5"
+- `send(fd, ...)` = "talk into phone line #5"
+
+Two flavors: **one listening socket** (the front-desk phone that rings on new connections) and **many client sockets** (the actual conversations).
+
+### epoll — "the receptionist watching all the lines"
+
+Your one thread can't pick up 1,000 phone lines at once. **epoll is a notifier:** give it a list of fds, and `epoll_wait()` sleeps until one needs attention, then says *"lines 6, 19, 340 are ready."* It's a **switchboard receptionist** watching 1,000 lights, telling the worker only which lit up. epoll **itself is also an fd** (from `epoll_create1()`).
+
+### The three together — concrete walkthrough
+
+```
+fd 3 = listening socket   | fd 4 = epoll instance | fd 5,6,7 = clients
+
+1. create listen socket → fd 3
+2. create epoll → fd 4
+3. tell epoll: "watch fd 3"        ← epoll_ctl(ADD)
+4. epoll_wait(fd 4) → sleeps
+5. client connects, fd 3 lights up → epoll: "fd 3 ready"
+6. accept() → new socket fd 5; tell epoll "also watch fd 5"
+7. epoll_wait → sleeps
+8. client sends "PING", fd 5 lights up → epoll: "fd 5 ready to read"
+9. recv(fd 5) → "PING" → processCommand → "PONG" → send(fd 5)
+10. loop back to epoll_wait
+```
+
+**The key subtlety:** epoll tells you a socket is **ready** — it does **not** read/write for you. The receptionist says "line #5 lit up"; *you* still pick up the line (`recv`). epoll is a **notifier of readiness**, not a delivery service.
+
+---
+
+## Q26: On what occasions does epoll notify the thread?
+
+**Question:**
+> When exactly does epoll wake the thread? Does it notify when a client sends a request?
+
+**Answer:**
+
+Think of each as a light on the switchboard. Two main lights + a couple of "something broke" lights.
+
+### 🟢 "Ready to READ" (`EPOLLIN`) — the common one
+
+| Which socket | What it means |
+|---|---|
+| Listening socket | A **new client is connecting** → `accept()` it |
+| Client socket | The client **sent data** (a request) → `recv()` it |
+| Client socket | The client **disconnected** → `recv()` returns 0 |
+
+So **yes** — a client sending a request fires this "ready to read" event.
+
+### 🟡 "Ready to WRITE" (`EPOLLOUT`)
+
+Fires when a socket has **room to accept outgoing data**. You only care about it occasionally — when a previous `send()` couldn't push the whole reply (see Q27).
+
+### 🔴 "Something broke" (`EPOLLERR`, `EPOLLHUP`)
+
+Connection errored or hung up → clean up and close the fd.
+
+### In plain English, epoll wakes the thread when:
+
+1. 📞 A new client wants to connect
+2. 💬 A client sent a command ← *the request case*
+3. 👋 A client disconnected
+4. ✍️ A clogged socket can finally receive the rest of a reply
+5. ⚠️ A connection broke
+
+Between these, the thread **sleeps** — never woken for idle clients. You tell epoll *per socket* which lights you care about (usually "ready-to-read"; add "ready-to-write" only when a reply gets stuck).
+
+---
+
+## Q27: What does "ready to write" mean?
+
+**Question:**
+> I don't understand "ready to write." Explain it.
+
+**Answer:**
+
+### `send()` doesn't go straight to the client
+
+`send(fd, reply)` drops bytes into an **OS outbox** for that socket; the OS delivers them across the network at its own pace:
+
+```
+your code --send()--> [ OS outbox for fd 5 ] --network--> client
+```
+
+`send()` returns as soon as the bytes are *in the outbox*, not when the client receives them.
+
+### The outbox has a limited size
+
+Usually there's room — a small `+PONG\r\n` fits instantly, and you never think about "ready to write." But the outbox can **fill up** if (1) the reply is huge, or (2) the client is slow to receive. Then `send()` accepts only **part** of your data — e.g. *"took 2,000 of your 10,000 bytes."*
+
+### Why we can't just retry
+
+Looping on `send()` would **freeze the one thread**, spinning on a full outbox while 999 other clients wait. In a single-threaded server you must **never wait on one client**.
+
+### So "ready to write" is:
+
+1. **Save the leftover bytes** in the client's output buffer.
+2. Tell epoll: *"notify me when fd 5's outbox has room again"* ← register for **ready-to-write**.
+3. **Move on** and serve other clients.
+4. When the outbox drains, epoll fires **`EPOLLOUT`** = *"room now"* → send the next chunk. Repeat until done, then tell epoll to **stop** notifying writes.
+
+**Mail-outbox analogy:** you drop letters in the box (`send`); the carrier (OS/network) empties it. Usually there's space — drop and walk away. But with a huge stack and a full box, you keep the rest **in your hand** and raise a flag: *"tell me when the box has space."* That flag is "ready to write."
+
+> **In one sentence:** "ready to write" means the OS's outbox for this client had filled up and has now drained enough to accept more bytes.
+
+This is exactly why each client needs an **output buffer** (`outbuf` in `ClientState`) — the "leftover letters in your hand."
+
+---
+
+## Q28: Internally, how does epoll know a socket needs attention?
+
+**Question:**
+> What happens internally so epoll gets notified that *this* socket needs attention?
+
+**Answer:**
+
+### Step 1 — data arrives (hardware interrupt)
+
+Bytes hit your **network card**. Instead of the CPU constantly asking "anything yet?", the card **taps the CPU on the shoulder** — a **hardware interrupt**. **Analogy:** a doorbell — it interrupts you when someone arrives; you don't keep checking the door.
+
+### Step 2 — the kernel sorts the mail
+
+The interrupt enters the **kernel**, which figures out **which socket** the packet belongs to and drops the bytes into **that socket's inbox** (receive buffer).
+
+### Step 3 — the clever part: callback registration
+
+When you did `epoll_ctl(ADD)` for fd 5, the kernel added epoll to **fd 5's wait queue** ("when I get data, here's who to tell"). So the moment data lands in fd 5's inbox, the kernel **fires epoll's callback**, which says: *"add fd 5 to epoll's ready list."*
+
+### Step 4 — the ready list
+
+epoll keeps one **ready list**. `epoll_wait()` is dead simple:
+- ready list non-empty? → return those fds immediately.
+- empty? → sleep the thread; wake it when a callback adds something.
+
+So the socket **reports itself** the instant it gets data — epoll never goes looking.
+
+### Why this matters — push vs pull
+
+- **Old way (`select`/`poll`, pull):** the worker checks **all** 1,000 lines every time, even if only one has data → **O(n)**, slows down as clients grow.
+- **epoll (push):** each line **raises its own hand** via the callback → the worker reads only the short list of raised hands → **O(active fds)**, ignores idle ones.
+
+**Analogy:** old way = teacher reading the whole roll to find a raised question; epoll = students raise hands, teacher looks only at raised hands. 30 or 30,000 students — same cost per question.
+
+```
+client sends "PING"
+  → network card (interrupt) → CPU
+  → kernel: packet is for fd 5 → drop in fd 5 inbox
+  → kernel checks fd 5 wait queue → fires epoll callback
+  → callback: put fd 5 on epoll ready list
+  → epoll_wait() wakes → "fd 5 ready"
+  → recv(fd 5) → process → reply
+```
+
+---
+
+## Q29: It's single-threaded and sequential — isn't that slow at scale?
+
+**Question:**
+> Single-threaded means it handles requests one after another. With lakhs of users hitting Redis, isn't sequential slow vs parallel?
+
+**Answer:**
+
+### Yes — it IS sequential. Here's why it's still fast.
+
+### The work itself is absurdly fast
+
+Redis stores data **in RAM** in a hash map. A `GET` is a memory lookup — about **100 nanoseconds**. One thread can do **~10 million** such ops/second. So **computation was never the bottleneck** — the slow part is **waiting** for the network, and waiting isn't "work."
+
+### CPU-bound vs I/O-bound
+
+- **CPU-bound** (image resize, math): heavy work → more threads/cores genuinely help.
+- **I/O-bound** (Redis): trivial work, all time spent **waiting** for data → threads just sit **blocked**. 1,000 threads asleep on `recv()` aren't doing 1,000× work — they're doing nothing 1,000 times.
+
+### epoll removes the waiting
+
+The epoll thread is only ever handed clients that are **ready now**, so it runs nonstop: *ready client → 100 ns op → next ready client → 100 ns op → …* It interleaves the **waiting** of thousands of clients while never pausing on any one.
+
+**Cashier analogy:** ringing up takes 1s; the slow part is customers fumbling for a wallet. Thread-per-client = one cashier per customer, 999 standing frozen. epoll = **one** cashier who only serves people who are **ready** — clears a huge line, because no single transaction was ever the holdup.
+
+### Sequential is actually *faster* here
+
+- **No locks** — one thread touches the data → no mutexes, no contention, no races (locking overhead can cost more than the op itself).
+- **No context-switching** between thousands of threads.
+- **Cache-friendly + predictable.**
+
+Real Redis chose single-threaded **on purpose** for in-memory work.
+
+### The honest downside
+
+If a **single command** is slow (`KEYS *` on 10M keys, a giant sort), it **stalls everyone** behind it. Real Redis warns against slow commands. (Redis 6+ multi-threads only the network read/write, keeping **command execution single-threaded** to stay lock-free.)
+
+### "But millions of users!"
+
+1. **One thread is already plenty** — a single instance does **100K–1M ops/sec**; a lakh of tiny lookups is easy.
+2. **For massive scale, run many instances** and split the data (**sharding/clustering**) — scale **horizontally**, not by adding threads to one instance.
+
+> **Punchline:** for in-memory work the operation is so fast that "parallel" buys nothing — the win is **never sitting idle**, which is exactly what epoll delivers. One thread that never waits beats a thousand that mostly sleep.
+
+---
+
+**Last Updated:** 2026-06-20
