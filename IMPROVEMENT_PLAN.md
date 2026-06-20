@@ -150,9 +150,9 @@ B1–B6 fixed together via one format change — see [`BUG_FIXES.md`](BUG_FIXES.
   - Build + unit tests + `test_all.sh` on every push and PR
 - [x] Add code coverage reporting ✅ — `make coverage` (gcov + gcovr), Codecov upload + badge
 
-**Status (2026-06-20):** Phase 2 effectively complete. 69 tests passing locally and in CI;
-Codecov badge live (~86%). Concurrency tests deferred to after Phase 3 (epoll). See
-[`TEST_STRATEGY.md`](TEST_STRATEGY.md).
+**Status (2026-06-20):** Phase 2 complete. **72 tests** passing locally and in CI;
+**97.9% line / 100% function** coverage, Codecov badge live. Concurrency tests deferred to
+after Phase 3 (epoll). See [`TEST_STRATEGY.md`](TEST_STRATEGY.md).
 
 #### Outcome
 
@@ -163,6 +163,10 @@ A README badge showing **"Tests: passing | Coverage: 85%"** instantly signals se
 ### Phase 3: Replace Threading with `epoll` ⭐⭐⭐ (1–2 weeks)
 
 **This is the game changer.** Most candidates cannot explain epoll. If you can, you stand out immediately.
+
+> 📋 **Detailed implementation plan:** see [`PHASE3_EPOLL_PLAN.md`](PHASE3_EPOLL_PLAN.md) — codebase
+> analysis, target Reactor architecture, the RESP-framing design, file-by-file changes, key
+> design decisions (LT-first, `signalfd`, keep `db_mutex`), incremental build order, and testing.
 
 #### Architecture Change
 

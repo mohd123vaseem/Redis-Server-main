@@ -146,10 +146,12 @@ the single-threaded event-loop architecture.
 - [x] Generate a coverage report (gcovr → `build/cov/coverage.xml` + `coverage.html`)
 - [x] Codecov upload wired into CI (`coverage` job) + badge in `README.md`
 
-**Result (2026-06-20):** local gcovr **93.6% lines** (100% functions); Codecov badge shows
-**~86%** (Codecov blends in partial/branch coverage, so it reads lower than pure line
-coverage — both are correct). 69 tests total. To raise coverage further, 13 handler tests
-were added to drive every command through `processCommand`.
+**Result (2026-06-20):** local gcovr **97.9% lines, 100% functions** (branch 60%); Codecov
+badge live (blends partial/branch coverage, so it reads a bit lower than pure line coverage
+— both correct). **72 tests total.** Coverage gaps found via the HTML report were closed:
+13 handler tests to drive every command through `processCommand`, then a batch covering all
+arity guards, the `purgeExpired` removal branch (via a past-dated TTL), and `rename`'s
+list/hash/TTL branches.
 
 **Why last:** it measures the tests that already exist — pointless until they do.
 
