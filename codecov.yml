@@ -1,14 +1,13 @@
 # Codecov configuration.
 #
 # Badge color is a linear gradient across `range`: red at the low end, green at
-# the high end. We set the high end to 90, so the badge is only fully GREEN at
-# 90%+ coverage. At the current ~86% it stays yellow — an honest signal that
-# we're close but not yet at the 90% bar. (It's a gradient, not a hard switch,
-# so values just under 90 trend yellow-green.)
+# the high end. We keep Codecov's default 70...100 so green is earned honestly —
+# only coverage near 100% renders green; our current ~86% shows yellow. (A
+# narrower range like 70...90 would paint 86% green, which we deliberately avoid.)
 coverage:
   precision: 1
   round: down
-  range: "70...90"
+  range: "70...100"
 
   status:
     # Project-level check: don't fail CI for tiny coverage dips.
