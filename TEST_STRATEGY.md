@@ -5,9 +5,10 @@
 > and *why that order* — so we don't lose the thread across sessions.
 
 **Created:** 2026-06-19
-**Status:** Phase 2 effectively COMPLETE ✅ — Steps 1–4 + 6 done; Step 5 (concurrency)
-deliberately deferred past Phase 3 (epoll). 69 tests green locally + in CI; Codecov badge
-live (~86%, 93.6% local line coverage).
+**Status:** Phase 2 COMPLETE ✅ — Steps 1–4 + 6 done; Step 5 (concurrency) deliberately
+deferred past Phase 3 (epoll). 72 tests green locally + in CI; Codecov badge live.
+Local coverage: **97.9% lines, 100% functions** (branch 60% — remaining branches are
+exception/library/defensive paths, intentionally not chased).
 
 ---
 
