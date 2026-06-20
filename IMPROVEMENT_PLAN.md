@@ -148,9 +148,11 @@ B1–B6 fixed together via one format change — see [`BUG_FIXES.md`](BUG_FIXES.
   - Verify mutex correctness
 - [x] Set up **GitHub Actions CI** ✅ — `.github/workflows/ci.yml`, first run green in 55s
   - Build + unit tests + `test_all.sh` on every push and PR
-- [ ] Add code coverage reporting (e.g., `gcov` + Codecov badge) — Step 6, not yet started
+- [x] Add code coverage reporting ✅ — `make coverage` (gcov + gcovr), Codecov upload + badge
 
-**Status (2026-06-20):** 56 tests passing locally and in CI. See [`TEST_STRATEGY.md`](TEST_STRATEGY.md).
+**Status (2026-06-20):** Phase 2 effectively complete. 69 tests passing locally and in CI;
+Codecov badge live (~86%). Concurrency tests deferred to after Phase 3 (epoll). See
+[`TEST_STRATEGY.md`](TEST_STRATEGY.md).
 
 #### Outcome
 
@@ -359,7 +361,7 @@ Use this as your tracker:
 - [x] Integration tests for RESP ✅ (19)
 - [ ] Concurrency tests ⏸️ (deferred to after Phase 3 — decision pending)
 - [x] GitHub Actions CI ✅ (green, 55s)
-- [ ] Coverage badge (Step 6)
+- [x] Coverage badge ✅ (Codecov live, ~86%)
 
 ### Phase 3: epoll
 - [ ] Non-blocking sockets

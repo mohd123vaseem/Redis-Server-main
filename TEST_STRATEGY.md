@@ -5,7 +5,9 @@
 > and *why that order* — so we don't lose the thread across sessions.
 
 **Created:** 2026-06-19
-**Status:** Steps 1–4 complete ✅ — 56 tests green (37 RedisDatabase + 19 RedisCommandHandler) locally and in GitHub Actions CI. `test_all.sh` also green.
+**Status:** Phase 2 effectively COMPLETE ✅ — Steps 1–4 + 6 done; Step 5 (concurrency)
+deliberately deferred past Phase 3 (epoll). 69 tests green locally + in CI; Codecov badge
+live (~86%, 93.6% local line coverage).
 
 ---
 
@@ -137,11 +139,16 @@ the single-threaded event-loop architecture.
 
 ---
 
-### Step 6 — Coverage reporting (polish)
+### Step 6 — Coverage reporting (polish) ✅ DONE
 
-- [ ] Compile tests with `--coverage` (gcov)
-- [ ] Generate a coverage report (lcov / gcovr)
-- [ ] Add a coverage badge to `README.md` (optional: Codecov)
+- [x] `make coverage` target — instruments `src/RedisDatabase.cpp` + `src/RedisCommandHandler.cpp` with `--coverage`, runs the tests, summarises with `gcovr`
+- [x] Generate a coverage report (gcovr → `build/cov/coverage.xml` + `coverage.html`)
+- [x] Codecov upload wired into CI (`coverage` job) + badge in `README.md`
+
+**Result (2026-06-20):** local gcovr **93.6% lines** (100% functions); Codecov badge shows
+**~86%** (Codecov blends in partial/branch coverage, so it reads lower than pure line
+coverage — both are correct). 69 tests total. To raise coverage further, 13 handler tests
+were added to drive every command through `processCommand`.
 
 **Why last:** it measures the tests that already exist — pointless until they do.
 
@@ -169,4 +176,4 @@ the single-threaded event-loop architecture.
 - [x] Step 3 — GitHub Actions CI + badge ✅ (first run green, 55s)
 - [x] Step 4 — RESP parser integration tests ✅ (19 tests, 56 total)
 - [⏸] Step 5 — Concurrency tests — **DEFERRED past Phase 3** (decided 2026-06-20)
-- [ ] Step 6 — Coverage badge ← in progress
+- [x] Step 6 — Coverage badge ✅ (Codecov live, ~86% / 93.6% local)
