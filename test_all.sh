@@ -19,7 +19,7 @@
 cd "$(dirname "$0")" || exit 1
 
 PORT="${PORT:-6390}"
-BIN=./my_redis_server
+BIN="${BIN:-./my_redis_server}"   # override e.g. BIN=./my_redis_server_asan to run under a sanitizer
 LOG="$(mktemp)"
 GOOD_RDB="$(mktemp)"
 SRV_PID=""
@@ -211,13 +211,13 @@ check_contains "TC-G1 clean shutdown log"    "$(cat "$LOG")" "Server Shutdown Co
 start_server
 check          "TC-G2 data persisted"        "$(r GET persisted)" "yes"
 
-# TC-G3: two idle clients -> shutdown joins exactly 2
+# TC-G3: two idle clients -> shutdown reports exactly 2 (epoll: closes, not joins)
 exec 7<>"/dev/tcp/127.0.0.1/$PORT"
 exec 8<>"/dev/tcp/127.0.0.1/$PORT"
 sleep 0.5
 stop_server
 exec 7>&- 7<&-; exec 8>&- 8<&-
-check_contains "TC-G3 joins 2 connections"   "$(cat "$LOG")" "Joining 2 active client connection(s)"
+check_contains "TC-G3 closes 2 connections"  "$(cat "$LOG")" "Closing 2 active client connection(s)"
 
 # TC-G4: an idle client must not block shutdown (no 300s recv hang)
 start_server
