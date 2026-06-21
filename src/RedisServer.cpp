@@ -13,6 +13,8 @@
 #include <csignal>
 #include <cstdint>
 #include <atomic>
+#include <vector>
+#include <chrono>
 
 // Set by the SIGINT handler, read by the event loop. A signal handler may only
 // touch async-signal-safe state, so this is ALL it does. The real cleanup runs
@@ -27,6 +29,10 @@ static void signalHandler(int /*signum*/) {
 // Defensive cap: never let a single client's not-yet-framed input grow without
 // bound (a misbehaving or malicious client could otherwise exhaust memory).
 static constexpr size_t MAX_INBUF = 64 * 1024 * 1024;   // 64 MB
+
+// Slow-loris protection: drop a client that has sent no data for this long.
+// Replaces the old blocking SO_RCVTIMEO (same 300s threshold).
+static constexpr std::chrono::seconds IDLE_TIMEOUT{300};
 
 void RedisServer::setupSignalHandler() {
     struct sigaction sa{};
@@ -91,6 +97,7 @@ void RedisServer::run() {
     // arriving just before epoll_wait() would otherwise block forever.
     constexpr int LOOP_TIMEOUT_MS = 1000;
     epoll_event events[MAX_EVENTS];
+    auto lastSweep = std::chrono::steady_clock::now();
 
     while (!g_shutdown) {
         int n = epoll_wait(epoll_fd, events, MAX_EVENTS, LOOP_TIMEOUT_MS);
@@ -114,6 +121,15 @@ void RedisServer::run() {
                 // handleRead may have closed the client; guard the write side.
                 if ((e & EPOLLOUT) && clients.count(fd)) flushOutput(fd);
             }
+        }
+
+        // Slow-loris protection: ~once a second, drop connections idle past
+        // IDLE_TIMEOUT. The 1s epoll_wait timeout guarantees we reach here even
+        // when there are no events at all.
+        auto now = std::chrono::steady_clock::now();
+        if (now - lastSweep >= std::chrono::seconds(1)) {
+            sweepIdleClients();
+            lastSweep = now;
         }
     }
 
@@ -144,7 +160,9 @@ void RedisServer::handleAccept() {
             close(client_fd);
             continue;
         }
-        clients.emplace(client_fd, ClientState{});
+        ClientState st;
+        st.lastActivity = std::chrono::steady_clock::now();   // start the idle clock
+        clients.emplace(client_fd, std::move(st));
     }
 }
 
@@ -152,6 +170,7 @@ void RedisServer::handleRead(int fd) {
     auto it = clients.find(fd);
     if (it == clients.end()) return;
     ClientState& c = it->second;
+    c.lastActivity = std::chrono::steady_clock::now();   // activity -> reset idle clock
 
     // Drain everything the kernel has for us right now into the input buffer.
     char buf[4096];
@@ -218,6 +237,19 @@ void RedisServer::closeClient(int fd) {
     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, nullptr);
     close(fd);
     clients.erase(fd);
+}
+
+void RedisServer::sweepIdleClients() {
+    auto now = std::chrono::steady_clock::now();
+    // Collect first, THEN close: closeClient() erases from `clients`, so we must
+    // not mutate the map while iterating it.
+    std::vector<int> stale;
+    for (const auto& kv : clients) {
+        if (now - kv.second.lastActivity > IDLE_TIMEOUT)
+            stale.push_back(kv.first);
+    }
+    for (int fd : stale)
+        closeClient(fd);
 }
 
 void RedisServer::shutdown() {

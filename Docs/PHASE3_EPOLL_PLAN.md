@@ -5,7 +5,12 @@
 > Node.js use. This is the headline differentiator from `IMPROVEMENT_PLAN.md` Phase 3.
 
 **Created:** 2026-06-20
-**Status:** Planning — not started
+**Status (2026-06-21):** Functionally complete — **Steps 1–5, 7, 8 done**: a working
+single-threaded epoll server (accept → frame → process → buffered write) with idle-connection
+timeout (slow-loris protection) restored. Verified clean under ASan, TSan, and the full
+`test_all.sh` harness (34/34); idle timeout verified live (idle client dropped after 300s).
+**Step 6** (graceful shutdown) works via an atomic flag + 1s `epoll_wait` timeout, but **not**
+yet via `signalfd` (optional polish). Edge-triggered (EPOLLET) deferred — level-triggered for now.
 **Prereq:** Phase 2 (test suite) complete — 72 tests, CI, coverage in place.
 
 ---
@@ -187,20 +192,26 @@ dense-ish, so a hash map (or even a vector indexed by fd) is ideal.
 
 ## 7. Implementation Order (incremental — keep tests green at every step)
 
-1. **RESP framing function + unit tests** (no epoll yet). Pure, TDD, epoll-proof. Land
-   `respFrameLength` and `tests/test_resp_framing.cpp` first. *(CI stays green.)*
-2. **Add the >1024-byte handler test** — currently would expose the truncation bug; proves the
-   framing approach handles large/pipelined input. Closes deferred Phase 1 item.
-3. **Epoll skeleton**: non-blocking listen fd, `epoll_create1`, `epoll_wait` loop, accept loop
-   (LT). Echo a fixed reply to prove the loop. No per-client buffers yet.
-4. **Per-client `ClientState`** + input buffer + framing + `processCommand` → reply written
-   immediately (assume writable). Now a real single-threaded server; test with `redis-cli`.
-5. **Non-blocking writes + `EPOLLOUT`**: buffer unsent bytes on `EAGAIN`, register `EPOLLOUT`,
-   flush on writable, deregister when drained. Handles backpressure/partial writes.
-6. **`signalfd` graceful shutdown**: drain in-flight writes, dump, close all fds, exit loop.
-7. **Idle-timeout sweep** (slow-loris) via `epoll_wait` timeout.
-8. **Run `test_all.sh`** (black-box integration — should pass unchanged) + manual `redis-cli` +
-   pipelined/large-payload checks. Then revisit B7 (fork dump) if desired.
+1. ✅ **DONE — RESP framing function + unit tests** (no epoll yet). Pure, TDD, epoll-proof.
+   `respFrameLength` + `tests/test_resp_framing.cpp` (18 tests). Committed.
+2. ✅ **COVERED — >1024-byte handling** — proven by `LargePayloadOver1024Bytes` in the framing
+   tests; a separate handler-level test was redundant. Truncation bug now fixed by framing.
+3. ✅ **DONE — Epoll skeleton**: non-blocking listen fd, `epoll_create1`, `epoll_wait` loop,
+   accept loop (LT). In `run()` / `makeNonBlocking()` / `handleAccept()`. (Built directly into
+   the real server below rather than as a throwaway echo stub.)
+4. ✅ **DONE — Per-client `ClientState`** + input buffer + framing + `processCommand`. In
+   `ClientState{inbuf,outbuf}` + `handleRead()`. Real single-threaded server, verified via `redis-cli`.
+5. ✅ **DONE — Non-blocking writes + `EPOLLOUT`**: buffer unsent bytes on `EAGAIN`, register
+   `EPOLLOUT`, flush on writable, deregister when drained. In `flushOutput()` / `updateEpollOut()`.
+6. 🟡 **PARTIAL — graceful shutdown works, but not via `signalfd`.** Dump + close all fds + exit
+   loop all work (`shutdown()`), driven by an atomic `g_shutdown` flag + a 1s `epoll_wait` timeout
+   (closes the SIGINT race). Switching to `signalfd` is optional polish, not yet done.
+7. ✅ **DONE — Idle-timeout sweep (slow-loris).** Each `ClientState` tracks `lastActivity`
+   (stamped on accept, refreshed on read); `sweepIdleClients()` closes clients idle past 300s,
+   run ~once a second off the `epoll_wait` timeout. Replaces the removed `SO_RCVTIMEO`; verified
+   live (idle client dropped after 300s, next request → broken pipe).
+8. ✅ **DONE — Ran `test_all.sh`** (34/34) + manual `redis-cli` + large/pipelined checks, all under
+   ASan/TSan. (B7 fork-dump still a future item.)
 
 Each step is independently testable; the unit tests and `test_all.sh` are the safety net.
 

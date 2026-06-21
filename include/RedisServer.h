@@ -3,6 +3,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <chrono>
 
 #include "RedisCommandHandler.h"
 
@@ -28,6 +29,9 @@ private:
         std::string inbuf;
         std::string outbuf;
         bool writeRegistered = false;   // are we currently watching EPOLLOUT for this fd?
+        // Last time we received data from this client — drives the idle timeout
+        // (slow-loris protection) that replaces the old blocking SO_RCVTIMEO.
+        std::chrono::steady_clock::time_point lastActivity;
     };
     std::unordered_map<int /*fd*/, ClientState> clients;
 
@@ -39,6 +43,7 @@ private:
     void flushOutput(int fd);     // try to drain a client's outbuf; arm EPOLLOUT if needed
     void closeClient(int fd);     // remove from epoll + close + erase state
     void updateEpollOut(int fd, bool wantWrite);
+    void sweepIdleClients();      // close clients idle longer than the timeout (slow-loris)
 
     void setupSignalHandler();
     static bool makeNonBlocking(int fd);

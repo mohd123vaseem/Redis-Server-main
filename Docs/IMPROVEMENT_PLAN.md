@@ -181,16 +181,20 @@ Blocking recv()/send()                   Non-blocking + event notification
 
 #### What You'll Build
 
-- [ ] **Non-blocking sockets** with `fcntl(fd, F_SETFL, O_NONBLOCK)`
-- [ ] **Epoll instance** via `epoll_create1()`
-- [ ] **Event registration** via `epoll_ctl()`
-- [ ] **Event loop** via `epoll_wait()`
-- [ ] **Per-client state machine**:
-  - Input buffer (accumulate partial reads)
-  - Output buffer (queue partial writes)
-  - Parser state (incomplete commands)
-- [ ] **Edge-triggered (EPOLLET) handling**
-- [ ] **Graceful client disconnect handling**
+> **Status (2026-06-21):** core epoll server done and verified (ASan/TSan/full harness).
+> See [`PHASE3_EPOLL_PLAN.md`](PHASE3_EPOLL_PLAN.md) for the step-by-step status.
+
+- [x] **Non-blocking sockets** with `fcntl(fd, F_SETFL, O_NONBLOCK)` ✅
+- [x] **Epoll instance** via `epoll_create1()` ✅
+- [x] **Event registration** via `epoll_ctl()` ✅
+- [x] **Event loop** via `epoll_wait()` ✅
+- [x] **Per-client state machine** ✅:
+  - Input buffer (accumulate partial reads) — `ClientState::inbuf` + `respFrameLength()`
+  - Output buffer (queue partial writes) — `ClientState::outbuf` + `EPOLLOUT` backpressure
+  - Parser state (incomplete commands) — handled by the framing function
+- [ ] **Edge-triggered (EPOLLET) handling** — using **level-triggered** for now (correct-first); ET is optional follow-up
+- [x] **Graceful client disconnect handling** ✅ (`closeClient()` on EOF/error)
+- [x] **Idle-connection timeout (slow-loris)** ✅ — `sweepIdleClients()` closes clients idle >300s (replaces `SO_RCVTIMEO`); verified live
 
 #### Concepts You'll Master
 
@@ -368,11 +372,13 @@ Use this as your tracker:
 - [x] Coverage badge ✅ (Codecov live, ~86%)
 
 ### Phase 3: epoll
-- [ ] Non-blocking sockets
-- [ ] Epoll event loop
-- [ ] Per-client buffer state machine
-- [ ] Partial read/write handling
-- [ ] Edge-triggered handling
+- [x] Non-blocking sockets ✅
+- [x] Epoll event loop ✅
+- [x] Per-client buffer state machine ✅
+- [x] Partial read/write handling ✅ (framing + `EPOLLOUT` backpressure)
+- [x] Idle-connection timeout / slow-loris ✅ (`sweepIdleClients`, 300s)
+- [ ] Edge-triggered handling (using level-triggered for now; optional)
+- [ ] `signalfd` shutdown (optional polish; atomic-flag shutdown works)
 
 ### Phase 4: Benchmarks
 - [ ] Run `redis-benchmark`
@@ -406,4 +412,4 @@ The **"tutorial follower → real engineer"** transition is one of the best thin
 ---
 
 **Created:** 2026-05-17
-**Last Updated:** 2026-06-20
+**Last Updated:** 2026-06-21
