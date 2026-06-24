@@ -3081,4 +3081,110 @@ If a **single command** is slow (`KEYS *` on 10M keys, a giant sort), it **stall
 
 ---
 
-**Last Updated:** 2026-06-20
+## Q30: What is `signalfd` (and what is a file descriptor)?
+
+**Question:**
+> What is `signalfd`, what is an fd, and how does it work? (Phase 3 Step 6 uses it for shutdown.)
+
+**Answer:**
+
+### File descriptor (fd) recap
+An **fd is a numbered ticket** the OS hands you to refer to something it manages — a file, a socket, a timer, even a signal. *Almost everything in Linux can be an fd*, which is what lets `epoll` watch them all the same way.
+
+### What a signal is
+A **signal is the OS tapping your program on the shoulder**: SIGINT = "user pressed Ctrl+C", SIGTERM = "please terminate", etc. It's a tiny urgent notification, not data.
+
+### The old, awkward way — signal handlers
+Traditionally you register a handler; when the signal arrives the OS **freezes your program wherever it is, runs the handler, then resumes.** This is asynchronous and disruptive — the handler can fire mid-operation, so it may only do tiny "async-signal-safe" things (like setting a flag). Our old code did exactly that: handler set `g_shutdown`, the loop polled it and juggled `EINTR`.
+
+### What signalfd does
+> **`signalfd` turns a signal into a readable file descriptor** — instead of interrupting you to run a handler, the signal makes an fd *readable*, which you check at a calm point in your loop.
+
+The urgent shoulder-tap becomes a polite note in your inbox.
+
+### How it works — 3 steps
+1. **Block the signal** so the default action / handler never fires (it becomes *pending*):
+   `pthread_sigmask(SIG_BLOCK, &mask, ...)` — done in the constructor.
+2. **Create a signalfd** that collects it: `signal_fd = signalfd(-1, &mask, SFD_NONBLOCK|SFD_CLOEXEC);`
+3. **Read it when ready** — when SIGINT arrives, `signal_fd` becomes readable; `read()` it to learn which signal it was, then break the loop → `shutdown()`.
+
+### Why it's perfect for the epoll loop
+SIGINT becomes **just one more light on the switchboard**. `epoll_wait()` wakes → "`signal_fd` is readable" → that means SIGINT → break → shut down. No async handler, no global flag, no `EINTR`. One mechanism handles sockets *and* signals.
+
+> **Mental model:** a normal signal **interrupts** you and runs a handler at a random moment; `signalfd` **demotes** it into a readable fd you handle calmly in your loop. (Its cousins `timerfd` and `eventfd` do the same "turn X into an fd" trick.)
+
+---
+
+## Q31: Why does the OS hand you an fd (a number) instead of keeping it to itself?
+
+**Question:**
+> When I open a file the OS gives me back a number (fd). Why give me anything — why not keep it internal? And why a number rather than the real thing?
+
+**Answer:**
+
+### Why give you anything at all
+Opening a file isn't one-shot — what you do is a **sequence** across separate calls: open → read → read again → write → close. Every later call must say *"operate on the thing I opened."* So the OS **must** give you a handle to name it; otherwise you'd have no way to ask for the next operation. It can't "keep it to itself" because *you* drive the follow-up calls.
+
+### Why a *number*, not the real object
+The real thing — kernel buffers, disk locations, permission records — lives in **kernel memory you're not allowed to touch.** If the OS handed you a raw pointer to its internals you could corrupt the kernel, read other processes' data, or crash the system. So it gives you a **meaningless little number** you can't misuse: the only thing you can do with fd 5 is ask the OS *"read from #5,"* and the OS **validates** it first. It's a safe, indirect reference — a leash, not the animal.
+
+### How it works under the hood
+The kernel keeps a **per-process table**: fd number → real object. The fd is literally the **row index** into that table.
+```
+3 → [open file X: position, permissions, ...]
+5 → [socket to client Y: buffers, ...]
+```
+You hold the index; the kernel holds (and guards) the real object.
+
+### It's also a permission token
+`open()` checks "are you allowed?" **once**, up front. The fd you get back is **proof you passed** — future reads just present the fd and the OS trusts it.
+
+### Analogies
+- **Coat-check ticket:** they store your coat in a back room you can't enter and give you ticket #42; you present #42, they fetch it. You never roam the coatroom.
+- **Bank account number:** the bank holds your money in a vault you can't access; you reference it by number and they act on your behalf after checking it's you.
+
+> **One line:** the number exists because you need a handle to keep using the thing across many calls, and it's a *number* (not the real object) so the dangerous internals stay safely inside the kernel — a **safe, validated reference**, never the keys to the engine room.
+
+---
+
+## Q32: What is the lifecycle of an fd, and what if permission is revoked while a file is open?
+
+**Question:**
+> How long does an fd survive? And if I'm reading a file and an admin removes my permission to it mid-read, what happens?
+
+**Answer:**
+
+### Lifecycle of an fd
+- 🟢 **Birth** — `open("abg.docx")`: OS checks permission, creates the kernel object, adds it to *your* process's fd table, returns the number (say fd 4).
+- 🔵 **Life** — fd 4 stays valid across as many `read`/`write`/`seek` calls as you like. It lives **inside your process only**.
+- 🔴 **Death** — when you `close(4)`, **or** the process exits (OS auto-closes all fds), **or** on `exec` for close-on-exec fds. The number is then **recycled** for a future `open()`.
+
+Nuances: `fork()` gives a child copies of your fds; the underlying kernel object is **reference-counted** and freed only when the *last* fd referring to it closes.
+
+### Permission revoked mid-read — the surprising rule
+> **Permission is checked at `open()` time, NOT on every read.**
+
+The fd *is* your capability — granted once at the door. So if an admin `chmod`s away your access **after** you've opened it:
+
+> **Your open fd keeps working — you keep reading.** Only **future** `open()` calls are denied.
+
+**Analogy:** your concert ticket is checked **at the door**; security doesn't re-check every song. If the venue stops new entries, everyone already inside keeps watching — only new arrivals are turned away.
+
+| What the admin does | Your already-open fd |
+|---|---|
+| `chmod` removes your read permission | ✅ Keeps reading; only new opens blocked |
+| Deletes the file (`rm`) | ✅ Keeps reading — data stays on disk until your fd closes ("deleted-but-open") |
+| `chown` (changes owner) | ✅ Unaffected; only future opens re-check |
+| Locks your user account | ✅ Running process + fds keep going (lockout stops new logins) |
+
+### Honest exceptions
+- True for **regular files on a local filesystem**. **NFS** may re-check and can fail mid-read.
+- **Unmounting the disk** or pulling storage makes reads fail — that's the data vanishing, not a permission check.
+- **Killing your process** closes the fd with it.
+- **SELinux/AppArmor** can be configured to revoke more aggressively; plain `chmod`/`chown` do not touch open fds.
+
+> **Principle:** access is checked at the **gate** (`open`), not while you hold the fd (already inside). Revoking permission later stops *new* entries but doesn't eject a valid open handle.
+
+---
+
+**Last Updated:** 2026-06-24
