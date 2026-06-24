@@ -20,6 +20,7 @@ private:
     int port;
     int server_socket;   // listening socket fd
     int epoll_fd;        // epoll instance fd
+    int signal_fd;       // signalfd delivering SIGINT into the event loop
 
     // Per-client state — replaces the old ClientWorker{thread, done, socket}.
     // No thread; just the buffers the event loop needs:
@@ -45,7 +46,6 @@ private:
     void updateEpollOut(int fd, bool wantWrite);
     void sweepIdleClients();      // close clients idle longer than the timeout (slow-loris)
 
-    void setupSignalHandler();
     static bool makeNonBlocking(int fd);
 };
 

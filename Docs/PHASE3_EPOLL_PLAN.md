@@ -5,12 +5,11 @@
 > Node.js use. This is the headline differentiator from `IMPROVEMENT_PLAN.md` Phase 3.
 
 **Created:** 2026-06-20
-**Status (2026-06-21):** Functionally complete — **Steps 1–5, 7, 8 done**: a working
-single-threaded epoll server (accept → frame → process → buffered write) with idle-connection
-timeout (slow-loris protection) restored. Verified clean under ASan, TSan, and the full
-`test_all.sh` harness (34/34); idle timeout verified live (idle client dropped after 300s).
-**Step 6** (graceful shutdown) works via an atomic flag + 1s `epoll_wait` timeout, but **not**
-yet via `signalfd` (optional polish). Edge-triggered (EPOLLET) deferred — level-triggered for now.
+**Status (2026-06-24):** Complete — **Steps 1–8 done**: a working single-threaded epoll server
+(accept → frame → process → buffered write) with idle-connection timeout (slow-loris) and
+`signalfd`-based graceful shutdown. Verified clean under ASan, TSan, and the full `test_all.sh`
+harness (34/34); idle timeout and shutdown verified live. Only **edge-triggered (EPOLLET)** is
+deliberately deferred — level-triggered is correct and standard for this design.
 **Prereq:** Phase 2 (test suite) complete — 72 tests, CI, coverage in place.
 
 ---
@@ -203,9 +202,10 @@ dense-ish, so a hash map (or even a vector indexed by fd) is ideal.
    `ClientState{inbuf,outbuf}` + `handleRead()`. Real single-threaded server, verified via `redis-cli`.
 5. ✅ **DONE — Non-blocking writes + `EPOLLOUT`**: buffer unsent bytes on `EAGAIN`, register
    `EPOLLOUT`, flush on writable, deregister when drained. In `flushOutput()` / `updateEpollOut()`.
-6. 🟡 **PARTIAL — graceful shutdown works, but not via `signalfd`.** Dump + close all fds + exit
-   loop all work (`shutdown()`), driven by an atomic `g_shutdown` flag + a 1s `epoll_wait` timeout
-   (closes the SIGINT race). Switching to `signalfd` is optional polish, not yet done.
+6. ✅ **DONE — `signalfd` graceful shutdown.** SIGINT is blocked in the constructor and delivered
+   via a `signalfd` watched in the epoll loop; when readable, the loop breaks and `shutdown()`
+   dumps + closes all fds. Replaces the old atomic flag + async handler — shutdown is now "just
+   another readable fd." Verified via `test_all.sh` (TC-G1/G4) and manual Ctrl+C.
 7. ✅ **DONE — Idle-timeout sweep (slow-loris).** Each `ClientState` tracks `lastActivity`
    (stamped on accept, refreshed on read); `sweepIdleClients()` closes clients idle past 300s,
    run ~once a second off the `epoll_wait` timeout. Replaces the removed `SO_RCVTIMEO`; verified

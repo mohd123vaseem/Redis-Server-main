@@ -377,8 +377,8 @@ Use this as your tracker:
 - [x] Per-client buffer state machine ✅
 - [x] Partial read/write handling ✅ (framing + `EPOLLOUT` backpressure)
 - [x] Idle-connection timeout / slow-loris ✅ (`sweepIdleClients`, 300s)
+- [x] `signalfd` graceful shutdown ✅ (SIGINT as an epoll event; no async handler)
 - [ ] Edge-triggered handling (using level-triggered for now; optional)
-- [ ] `signalfd` shutdown (optional polish; atomic-flag shutdown works)
 
 ### Phase 4: Benchmarks
 - [ ] Run `redis-benchmark`
@@ -412,4 +412,4 @@ The **"tutorial follower → real engineer"** transition is one of the best thin
 ---
 
 **Created:** 2026-05-17
-**Last Updated:** 2026-06-21
+**Last Updated:** 2026-06-24

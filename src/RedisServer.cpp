@@ -12,19 +12,10 @@
 #include <cerrno>
 #include <csignal>
 #include <cstdint>
-#include <atomic>
 #include <vector>
 #include <chrono>
-
-// Set by the SIGINT handler, read by the event loop. A signal handler may only
-// touch async-signal-safe state, so this is ALL it does. The real cleanup runs
-// on the main thread once epoll_wait() returns with EINTR.
-// (A later step may replace this with a signalfd integrated into the loop.)
-static std::atomic<bool> g_shutdown{false};
-
-static void signalHandler(int /*signum*/) {
-    g_shutdown = true;
-}
+#include <sys/signalfd.h>
+#include <pthread.h>
 
 // Defensive cap: never let a single client's not-yet-framed input grow without
 // bound (a misbehaving or malicious client could otherwise exhaust memory).
@@ -34,19 +25,16 @@ static constexpr size_t MAX_INBUF = 64 * 1024 * 1024;   // 64 MB
 // Replaces the old blocking SO_RCVTIMEO (same 300s threshold).
 static constexpr std::chrono::seconds IDLE_TIMEOUT{300};
 
-void RedisServer::setupSignalHandler() {
-    struct sigaction sa{};
-    sa.sa_handler = signalHandler;
-    sigemptyset(&sa.sa_mask);
-    // No SA_RESTART: we WANT epoll_wait() to return with EINTR when SIGINT
-    // arrives, so the loop can notice g_shutdown instead of blocking forever.
-    sa.sa_flags = 0;
-    sigaction(SIGINT, &sa, nullptr);
-}
-
 RedisServer::RedisServer(int port)
-    : port(port), server_socket(-1), epoll_fd(-1) {
-    setupSignalHandler();
+    : port(port), server_socket(-1), epoll_fd(-1), signal_fd(-1) {
+    // Block SIGINT process-wide so the kernel's default disposition (terminate)
+    // never fires. Instead the event loop reads SIGINT from a signalfd (created
+    // in run()). Threads spawned after this — e.g. the persistence thread —
+    // inherit this blocked mask, so the signal is delivered only via the fd.
+    sigset_t mask;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGINT);
+    pthread_sigmask(SIG_BLOCK, &mask, nullptr);
 }
 
 bool RedisServer::makeNonBlocking(int fd) {
@@ -89,30 +77,50 @@ void RedisServer::run() {
     ev.data.fd = server_socket;
     epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_socket, &ev);
 
+    // A signalfd turns SIGINT into a readable fd we can watch in the loop — no
+    // async signal handler needed. SIGINT was already blocked in the constructor,
+    // so it is delivered here instead of running the default (terminate) action.
+    sigset_t sigmask;
+    sigemptyset(&sigmask);
+    sigaddset(&sigmask, SIGINT);
+    signal_fd = signalfd(-1, &sigmask, SFD_NONBLOCK | SFD_CLOEXEC);
+    if (signal_fd < 0) { std::cerr << "Error Creating signalfd\n"; return; }
+    epoll_event sev{};
+    sev.events = EPOLLIN;
+    sev.data.fd = signal_fd;
+    epoll_ctl(epoll_fd, EPOLL_CTL_ADD, signal_fd, &sev);
+
     std::cout << "Redis Server Listening On Port " << port << " (epoll)\n";
 
     constexpr int MAX_EVENTS = 64;
-    // Finite timeout (not -1): the loop wakes at least once a second to re-check
-    // g_shutdown. This makes shutdown prompt AND closes the race where a SIGINT
-    // arriving just before epoll_wait() would otherwise block forever.
+    // Finite 1s timeout so the idle-client sweep (below) runs even when there are
+    // no socket events. Shutdown no longer depends on this — SIGINT arrives as a
+    // readable signal_fd event and breaks the loop promptly.
     constexpr int LOOP_TIMEOUT_MS = 1000;
     epoll_event events[MAX_EVENTS];
     auto lastSweep = std::chrono::steady_clock::now();
 
-    while (!g_shutdown) {
+    bool running = true;
+    while (running) {
         int n = epoll_wait(epoll_fd, events, MAX_EVENTS, LOOP_TIMEOUT_MS);
         if (n < 0) {
-            if (errno == EINTR) continue;   // SIGINT etc. -> loop re-checks g_shutdown
+            if (errno == EINTR) continue;
             std::cerr << "epoll_wait error: " << std::strerror(errno) << "\n";
             break;
         }
-        // n == 0 -> timeout, no events; loop falls through and re-checks g_shutdown.
+        // n == 0 -> timeout, no events; falls through to the idle sweep below.
 
         for (int i = 0; i < n; ++i) {
             int fd = events[i].data.fd;
             uint32_t e = events[i].events;
 
-            if (fd == server_socket) {
+            if (fd == signal_fd) {
+                // SIGINT arrived. Drain the fd, then stop the loop -> shutdown().
+                signalfd_siginfo si;
+                while (read(signal_fd, &si, sizeof(si)) == static_cast<ssize_t>(sizeof(si))) {}
+                running = false;
+                break;
+            } else if (fd == server_socket) {
                 handleAccept();
             } else if (e & (EPOLLHUP | EPOLLERR)) {
                 closeClient(fd);
@@ -122,6 +130,7 @@ void RedisServer::run() {
                 if ((e & EPOLLOUT) && clients.count(fd)) flushOutput(fd);
             }
         }
+        if (!running) break;
 
         // Slow-loris protection: ~once a second, drop connections idle past
         // IDLE_TIMEOUT. The 1s epoll_wait timeout guarantees we reach here even
@@ -266,6 +275,7 @@ void RedisServer::shutdown() {
         close(kv.first);
     clients.clear();
 
+    if (signal_fd != -1) { close(signal_fd); signal_fd = -1; }
     if (server_socket != -1) { close(server_socket); server_socket = -1; }
     if (epoll_fd != -1) { close(epoll_fd); epoll_fd = -1; }
 
