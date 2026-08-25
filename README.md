@@ -3,16 +3,10 @@
 [![CI](https://github.com/mohd123vaseem/Redis-Server-main/actions/workflows/ci.yml/badge.svg)](https://github.com/mohd123vaseem/Redis-Server-main/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/mohd123vaseem/Redis-Server-main/branch/main/graph/badge.svg)](https://codecov.io/gh/mohd123vaseem/Redis-Server-main)
 
-***
-
-**Step‑by‑Step Video Tutorial:** Watch the full implementation from start to finish on YouTube:\
-[Build Your Own Redis Server in C++](https://youtube.com/playlist?list=PL6F3pyVdiAkfr4HaJXNrQDviFJNUWahgI&si=145SP0xehVBxciS0) \
-*The full playlist will be available on May 11.*
-
 ---
 
 ## Task
-A lightweight Redis-compatible in-memory data store written in C++. Supports strings, lists, and hashes, full Redis Serialization Protocol (RESP) parsing, multi-client concurrency, and periodic disk persistence.
+A lightweight Redis-compatible in-memory data store written in C++. Supports strings, lists, and hashes, full Redis Serialization Protocol (RESP) parsing, a single-threaded epoll event loop for concurrent clients, and periodic disk persistence.
 
 ---
 
@@ -20,7 +14,7 @@ A lightweight Redis-compatible in-memory data store written in C++. Supports str
 **Name:** `my_redis_server`  
 **Default Port:** `6379`  
 
-This project implements a Redis clone in C++, providing common Redis commands over a plain TCP socket using the RESP protocol. It supports:
+This project implements a Redis clone in C++, providing common Redis commands over a plain TCP socket using the RESP protocol. Networking is handled by a single-threaded, non-blocking **epoll** event loop (the Reactor pattern) that multiplexes all clients on one thread. It supports:
 
 - **Common Commands:** PING, ECHO, FLUSHALL
 - **Key/Value:** SET, GET, KEYS, TYPE, DEL/UNLINK, EXPIRE, RENAME
@@ -43,7 +37,8 @@ Data is automatically dumped to `dump.my_rdb` every 300 seconds and on graceful 
 │   ├── RedisDatabase.cpp
 │   ├── RedisServer.cpp
 │   └── main.cpp            # Entry point
-├── Concepts,UseCases&Tests.md    # Design concepts and command use cases
+├── Docs/                   # Design concepts, use cases, and Q&A notes
+├── tests/                  # Google Test unit + integration tests
 ├── Makefile                # Build rules
 ├── README.md               # This documentation
 └── test_all.sh             # Bash script for all tests
@@ -89,7 +84,7 @@ No dump found or load failed; starting with an empty database.
 
 A background thread dumps the database every 5 minutes.
 
-To gracefully shutdown and persist immediately, press `Ctrl+C`.
+Press `Ctrl+C` to shut down gracefully — SIGINT is delivered to the event loop via a `signalfd`, which persists the database and closes all connections before exiting.
 
 ---
 
@@ -154,8 +149,10 @@ OK
 
 ## Design & Architecture
 
-- **Concurrency:** Each client is handled in its own `std::thread`.  
-- **Synchronization:** A single `std::mutex db_mutex` guards all in-memory stores.  
+- **Concurrency:** A single-threaded, non-blocking **epoll** event loop (Reactor pattern) multiplexes the listening socket and all clients on one thread — no thread-per-client.
+- **Per-client buffering:** Each client keeps an `inbuf`/`outbuf`; partial reads are reframed via `respFrameLength()` and partial writes are drained under `EPOLLOUT` backpressure.
+- **Robustness:** `signalfd`-based graceful shutdown, a 300s idle-connection sweep (slow-loris protection), a 64 MB per-client input cap, plus `SO_KEEPALIVE` and `MSG_NOSIGNAL`.
+- **Synchronization:** A single `std::mutex db_mutex` guards all in-memory stores against the background persistence thread.  
 - **Data Stores:**  
   - `kv_store` (`unordered_map<string,string>`) for strings  
   - `list_store` (`unordered_map<string,vector<string>>`) for lists  
@@ -169,13 +166,13 @@ OK
 
 ## Concepts & Use Cases
 
-Refer to [Concepts,UseCases&Tests.md](Concepts,UseCases&Tests.md) for a detailed description of the underlying concepts (TCP sockets, RESP, data structures, etc.) and real‑world usage scenarios for each command.
+Refer to the [Docs/](Docs/) folder for a detailed description of the underlying concepts (TCP sockets, RESP, data structures, etc.) and real‑world usage scenarios for each command.
 
 ---
 
 ## Testing
 
-You can verify functionality interactively or via scripts. See the test examples in `Concepts,UseCases&Tests.md` or use the provided `test_all.sh` script for end‑to‑end validation.
+You can verify functionality interactively or via scripts. See the `Docs/` folder for test examples, run the Google Test suite under `tests/`, or use the provided `test_all.sh` script for end‑to‑end validation.
 
 ---
 
