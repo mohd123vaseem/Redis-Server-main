@@ -62,6 +62,69 @@ std::vector<std::string> parseRespCommand(const std::string &input) {//imp
     return tokens;
 }
 
+namespace {
+// Parses a base-10 integer from buf[start, end) without throwing. Returns true
+// on success. Used by respFrameLength so framing never relies on exceptions.
+bool parseFrameInt(const std::string& buf, size_t start, size_t end, long& out) {
+    if (start >= end) return false;
+    bool neg = false;
+    size_t i = start;
+    if (buf[i] == '-') { neg = true; ++i; if (i >= end) return false; }
+    long val = 0;
+    for (; i < end; ++i) {
+        if (buf[i] < '0' || buf[i] > '9') return false;
+        val = val * 10 + (buf[i] - '0');
+    }
+    out = neg ? -val : val;
+    return true;
+}
+
+// Upper bound on a single bulk string, mirroring Redis's proto-max-bulk-len
+// (512 MB). Prevents a malicious "$999999999" from making us buffer forever.
+const long MAX_BULK_LEN = 512L * 1024 * 1024;
+} // namespace
+
+ssize_t respFrameLength(const std::string& buf) {
+    if (buf.empty()) return 0;                       // nothing yet — need more
+
+    // Inline command (doesn't start with '*'): complete at the first '\n'.
+    if (buf[0] != '*') {
+        size_t nl = buf.find('\n');
+        if (nl == std::string::npos) return 0;       // line not terminated yet
+        return static_cast<ssize_t>(nl + 1);
+    }
+
+    // RESP array: "*<N>\r\n" then N bulk strings "$<len>\r\n<bytes>\r\n".
+    size_t crlf = buf.find("\r\n", 1);
+    if (crlf == std::string::npos) return 0;         // count line incomplete
+
+    long n;
+    if (!parseFrameInt(buf, 1, crlf, n) || n < 0) return -1;  // bad element count
+    size_t pos = crlf + 2;
+
+    for (long i = 0; i < n; ++i) {
+        if (pos >= buf.size()) return 0;             // next '$' hasn't arrived
+        if (buf[pos] != '$') return -1;              // expected a bulk header
+
+        size_t hdr = buf.find("\r\n", pos + 1);
+        if (hdr == std::string::npos) return 0;      // length line incomplete
+
+        long len;
+        if (!parseFrameInt(buf, pos + 1, hdr, len) || len < 0 || len > MAX_BULK_LEN)
+            return -1;                               // bad / oversized bulk length
+
+        size_t dataStart = hdr + 2;
+        size_t need = dataStart + static_cast<size_t>(len) + 2;  // data + trailing CRLF
+        if (need > buf.size()) return 0;             // payload not fully arrived
+
+        if (buf[dataStart + len] != '\r' || buf[dataStart + len + 1] != '\n')
+            return -1;                               // missing terminator -> corrupt
+
+        pos = need;
+    }
+    return static_cast<ssize_t>(pos);                // bytes in this complete command
+}
+
 //----------------------
 // Common Commands
 //----------------------

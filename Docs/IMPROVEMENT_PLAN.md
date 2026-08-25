@@ -150,9 +150,9 @@ B1–B6 fixed together via one format change — see [`BUG_FIXES.md`](BUG_FIXES.
   - Build + unit tests + `test_all.sh` on every push and PR
 - [x] Add code coverage reporting ✅ — `make coverage` (gcov + gcovr), Codecov upload + badge
 
-**Status (2026-06-20):** Phase 2 effectively complete. 69 tests passing locally and in CI;
-Codecov badge live (~86%). Concurrency tests deferred to after Phase 3 (epoll). See
-[`TEST_STRATEGY.md`](TEST_STRATEGY.md).
+**Status (2026-06-20):** Phase 2 complete. **72 tests** passing locally and in CI;
+**97.9% line / 100% function** coverage, Codecov badge live. Concurrency tests deferred to
+after Phase 3 (epoll). See [`TEST_STRATEGY.md`](TEST_STRATEGY.md).
 
 #### Outcome
 
@@ -163,6 +163,10 @@ A README badge showing **"Tests: passing | Coverage: 85%"** instantly signals se
 ### Phase 3: Replace Threading with `epoll` ⭐⭐⭐ (1–2 weeks)
 
 **This is the game changer.** Most candidates cannot explain epoll. If you can, you stand out immediately.
+
+> 📋 **Detailed implementation plan:** see [`PHASE3_EPOLL_PLAN.md`](PHASE3_EPOLL_PLAN.md) — codebase
+> analysis, target Reactor architecture, the RESP-framing design, file-by-file changes, key
+> design decisions (LT-first, `signalfd`, keep `db_mutex`), incremental build order, and testing.
 
 #### Architecture Change
 
@@ -177,16 +181,20 @@ Blocking recv()/send()                   Non-blocking + event notification
 
 #### What You'll Build
 
-- [ ] **Non-blocking sockets** with `fcntl(fd, F_SETFL, O_NONBLOCK)`
-- [ ] **Epoll instance** via `epoll_create1()`
-- [ ] **Event registration** via `epoll_ctl()`
-- [ ] **Event loop** via `epoll_wait()`
-- [ ] **Per-client state machine**:
-  - Input buffer (accumulate partial reads)
-  - Output buffer (queue partial writes)
-  - Parser state (incomplete commands)
-- [ ] **Edge-triggered (EPOLLET) handling**
-- [ ] **Graceful client disconnect handling**
+> **Status (2026-06-21):** core epoll server done and verified (ASan/TSan/full harness).
+> See [`PHASE3_EPOLL_PLAN.md`](PHASE3_EPOLL_PLAN.md) for the step-by-step status.
+
+- [x] **Non-blocking sockets** with `fcntl(fd, F_SETFL, O_NONBLOCK)` ✅
+- [x] **Epoll instance** via `epoll_create1()` ✅
+- [x] **Event registration** via `epoll_ctl()` ✅
+- [x] **Event loop** via `epoll_wait()` ✅
+- [x] **Per-client state machine** ✅:
+  - Input buffer (accumulate partial reads) — `ClientState::inbuf` + `respFrameLength()`
+  - Output buffer (queue partial writes) — `ClientState::outbuf` + `EPOLLOUT` backpressure
+  - Parser state (incomplete commands) — handled by the framing function
+- [ ] **Edge-triggered (EPOLLET) handling** — using **level-triggered** for now (correct-first); ET is optional follow-up
+- [x] **Graceful client disconnect handling** ✅ (`closeClient()` on EOF/error)
+- [x] **Idle-connection timeout (slow-loris)** ✅ — `sweepIdleClients()` closes clients idle >300s (replaces `SO_RCVTIMEO`); verified live
 
 #### Concepts You'll Master
 
@@ -364,11 +372,13 @@ Use this as your tracker:
 - [x] Coverage badge ✅ (Codecov live, ~86%)
 
 ### Phase 3: epoll
-- [ ] Non-blocking sockets
-- [ ] Epoll event loop
-- [ ] Per-client buffer state machine
-- [ ] Partial read/write handling
-- [ ] Edge-triggered handling
+- [x] Non-blocking sockets ✅
+- [x] Epoll event loop ✅
+- [x] Per-client buffer state machine ✅
+- [x] Partial read/write handling ✅ (framing + `EPOLLOUT` backpressure)
+- [x] Idle-connection timeout / slow-loris ✅ (`sweepIdleClients`, 300s)
+- [x] `signalfd` graceful shutdown ✅ (SIGINT as an epoll event; no async handler)
+- [ ] Edge-triggered handling (using level-triggered for now; optional)
 
 ### Phase 4: Benchmarks
 - [ ] Run `redis-benchmark`
@@ -402,4 +412,4 @@ The **"tutorial follower → real engineer"** transition is one of the best thin
 ---
 
 **Created:** 2026-05-17
-**Last Updated:** 2026-06-20
+**Last Updated:** 2026-06-24

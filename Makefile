@@ -109,4 +109,30 @@ coverage: $(COV_SRC_OBJS) $(COV_TEST_OBJS) $(BUILD_DIR)/gtest-all.o $(BUILD_DIR)
 	@echo "Coverage XML  -> $(COV_DIR)/coverage.xml   (for Codecov upload)"
 	@echo "Coverage HTML -> $(COV_DIR)/coverage.html  (open in a browser)"
 
-.PHONY: all clean rebuild run gtest test coverage
+# ----------------------------------------------------------------------------
+# AddressSanitizer + UndefinedBehaviorSanitizer build — for hunting memory bugs
+# (buffer overflows, use-after-free). Recompiles with tripwires that print the
+# EXACT file:line of any bad memory access at runtime.
+#
+# IMPORTANT: do NOT run this build under `ulimit -v` — ASan reserves a huge
+# virtual address space for its shadow memory, so a virtual-memory cap breaks it.
+# Use `timeout <secs>` alone to cage it.
+# ----------------------------------------------------------------------------
+ASAN_BIN = my_redis_server_asan
+asan:
+	$(CXX) -std=c++17 -pthread -g -O1 -fsanitize=address,undefined \
+	    -fno-omit-frame-pointer $(SRCS) -o $(ASAN_BIN)
+	@echo "Built $(ASAN_BIN). Run it caged:  timeout 20 ./$(ASAN_BIN) 6399"
+
+# ----------------------------------------------------------------------------
+# ThreadSanitizer build — for hunting DATA RACES (two threads touching the same
+# memory without synchronization). Catches bugs AddressSanitizer cannot, and
+# prints the exact lines of both racing accesses. Cage with `timeout`.
+# ----------------------------------------------------------------------------
+TSAN_BIN = my_redis_server_tsan
+tsan:
+	$(CXX) -std=c++17 -pthread -g -O1 -fsanitize=thread \
+	    -fno-omit-frame-pointer $(SRCS) -o $(TSAN_BIN)
+	@echo "Built $(TSAN_BIN). Run it caged:  timeout 30 ./$(TSAN_BIN) 6399"
+
+.PHONY: all clean rebuild run gtest test coverage asan tsan

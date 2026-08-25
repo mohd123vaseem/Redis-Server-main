@@ -6,5 +6,10 @@ build
 
 my_redis_server
 
+# Sanitizer builds + reports (debugging only, never committed)
+my_redis_server_asan
+my_redis_server_tsan
+asan_report.*
+
 # Vendored Google Test source (fetched via `make gtest`, not committed)
 third_party
